@@ -18,6 +18,7 @@ import time
 from beamngpy import BeamNGpy, Scenario, Vehicle
 from beamngpy.sensors import Damage, Electrics, GForces
 
+import outgauge
 import pc_config
 
 DEFAULT_HOST = os.environ.get("BEAMNG_HOST", "127.0.0.1")
@@ -30,6 +31,24 @@ def _err(exc: Exception, hint: bool = True) -> dict:
     out = {"ok": False, "error": repr(exc)}
     if hint:
         out["hint"] = _HINT
+    return out
+
+
+def _parts_summary(tree) -> dict:
+    """Flatten a part tree to {slot_id: chosenPartName} for installed parts only
+    (drops the verbose suitablePartNames lists that bloat get_part_config)."""
+    out: dict = {}
+
+    def walk(n):
+        if isinstance(n, dict):
+            sid, ch = n.get("id"), n.get("chosenPartName")
+            if sid and ch:
+                out[sid] = ch
+            for c in (n.get("children") or {}).values():
+                walk(c)
+
+    if isinstance(tree, dict):
+        walk(tree)
     return out
 
 
@@ -229,44 +248,123 @@ class Session:
                 return _err(exc)
 
     def telemetry(self, vid=None) -> dict:
+        """Live telemetry. Tries the rich per-vehicle path (126 Electrics channels
+        + Damage + GForces + State); if that socket is unavailable (e.g. right
+        after a config-change respawn) it FALLS BACK to GE-side state + OutGauge,
+        so a useful reading is always returned (with a `source` field)."""
+        guard = self._require_conn()
+        if guard:
+            return guard
+        with self._lock:
+            try:
+                target = vid or self.bng.vehicles.get_player_vehicle_id().get("vid")
+            except Exception:  # noqa: BLE001
+                target = vid
+            # 1) rich path — per-vehicle classic sensors
+            rich_err = None
+            try:
+                rvid = self._use_current(vid)
+                v = self.vehicles[rvid]
+                v.poll_sensors()
+                st = dict(v.state)
+                return {
+                    "ok": True,
+                    "vid": rvid,
+                    "source": "electrics",
+                    "electrics": dict(v.sensors["electrics"]),
+                    "damage": self._compact_damage(dict(v.sensors["damage"])),
+                    "gforces": dict(v.sensors["gforces"]),
+                    "state": {"pos": st.get("pos"), "dir": st.get("dir"),
+                              "vel": st.get("vel")},
+                }
+            except Exception as exc:  # noqa: BLE001
+                rich_err = repr(exc)
+            # 2) fallback — GE state + OutGauge (immune to the per-vehicle socket)
+            fb = {"ok": True, "vid": target, "source": "fallback",
+                  "note": "per-vehicle telemetry socket unavailable (often right "
+                          "after a config-change respawn); returned GE state + "
+                          "OutGauge. Recover/reload the car to restore Electrics.",
+                  "rich_error": rich_err}
+            try:
+                states = self.bng.vehicles.get_states([target]) if target else {}
+                s = states.get(target) if isinstance(states, dict) else None
+                if isinstance(s, dict):
+                    fb["state"] = {"pos": s.get("pos"), "dir": s.get("dir"),
+                                   "vel": s.get("vel")}
+            except Exception:  # noqa: BLE001
+                pass
+            og = self._outgauge_snapshot()
+            if og is not None:
+                fb["outgauge"] = og
+            if "state" not in fb and "outgauge" not in fb:
+                return _err(Exception(rich_err or "telemetry unavailable"))
+            return fb
+
+    @staticmethod
+    def _compact_damage(dmg: dict) -> dict:
+        """Trim the huge Damage tree to a total + the parts that are actually
+        damaged (drops the per-beam deform_group_damage internals)."""
+        pd = dmg.get("part_damage") or {}
+        return {
+            "total": dmg.get("damage"),
+            "lowpressure": dmg.get("lowpressure"),
+            "damaged_parts": {k: round(v.get("damage", 0), 3)
+                              for k, v in pd.items()
+                              if isinstance(v, dict) and v.get("damage", 0) > 0},
+        }
+
+    def _outgauge_snapshot(self):
+        """One OutGauge packet (no per-vehicle socket). None if disabled/busy."""
+        try:
+            d = outgauge.listen_once(ip=self.host, port=4444, timeout=1.2)
+        except Exception:  # noqa: BLE001 — port busy / OutGauge off
+            return None
+        if not d:
+            return None
+        return {k: d.get(k) for k in ("speed_kmh", "rpm", "gear", "throttle",
+                                      "brake", "clutch", "fuel", "engTemp")}
+
+    def vehicle_lua(self, code: str, vid=None) -> dict:
+        """Run a Lua chunk on the current vehicle and return its value (end with
+        `return <expr>`). Deep-introspection hook for analysis — query powertrain
+        power/torque, turbo boost, suspension travel, beam stress, etc. Needs the
+        per-vehicle socket (recover the car if it was just respawned)."""
         guard = self._require_conn()
         if guard:
             return guard
         with self._lock:
             try:
                 vid = self._use_current(vid)
-                v = self.vehicles[vid]
-                v.poll_sensors()
-                electrics = dict(v.sensors["electrics"])
-                damage = dict(v.sensors["damage"])
-                gforces = dict(v.sensors["gforces"])
-                st = dict(v.state)
-                state = {
-                    "pos": st.get("pos"),
-                    "dir": st.get("dir"),
-                    "vel": st.get("vel"),
-                }
-                return {
-                    "ok": True,
-                    "vid": vid,
-                    "electrics": electrics,
-                    "damage": damage,
-                    "gforces": gforces,
-                    "state": state,
-                }
+                resp = self.vehicles[vid].queue_lua_command(code, response=True)
+                return {"ok": True, "vid": vid, "result": resp}
             except Exception as exc:  # noqa: BLE001
                 return _err(exc)
 
     def get_tuning(self, vid=None) -> dict:
+        """Read the current car's config COMPACTLY and ROBUSTLY via GE-side
+        get_current_info (installed parts + tuning vars) — no per-vehicle socket,
+        and without the 100k-char suitablePartNames bloat of get_part_config."""
         guard = self._require_conn()
         if guard:
             return guard
         with self._lock:
             try:
-                vid = self._use_current(vid)
-                v = self.vehicles[vid]
-                cfg = v.get_part_config()
-                return {"ok": True, "vid": vid, "part_config": cfg}
+                if vid is None:
+                    vid = self.bng.vehicles.get_player_vehicle_id().get("vid")
+                info = self.bng.vehicles.get_current_info(include_config=True)
+                vi = info.get(vid) if isinstance(info, dict) else None
+                if not vi:
+                    return {"ok": False,
+                            "error": "vehicle %r not in running game" % vid}
+                cfg = vi.get("config") or {}
+                return {
+                    "ok": True,
+                    "vid": vid,
+                    "model": cfg.get("model") or vi.get("model"),
+                    "config_file": cfg.get("partConfigFilename"),
+                    "vars": cfg.get("vars", {}),
+                    "installed_parts": _parts_summary(cfg.get("partsTree")),
+                }
             except Exception as exc:  # noqa: BLE001
                 return _err(exc)
 

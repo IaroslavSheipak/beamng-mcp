@@ -16,6 +16,7 @@ from mcp.server.fastmcp import FastMCP
 
 import outgauge
 import pc_config
+from logger import drive_logger, latest_log, summarize_csv
 from session import session
 
 mcp = FastMCP("beamng-mcp")
@@ -273,6 +274,59 @@ def outgauge_telemetry(ip: str = "127.0.0.1", port: int = 4444,
             "showLights": data["showLights"],
         }
         return {"ok": True, "received": True, "data": out}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": repr(exc)}
+
+
+# --- 15. start_logging (DRIVE LOG, robust) ----------------------------------
+@mcp.tool()
+def start_logging() -> dict:
+    """Start recording OutGauge telemetry to a CSV in logs/ (background thread).
+    Enable OutGauge in-game first (Options > Other > Protocols, 127.0.0.1:4444).
+    Robust — does NOT use the per-vehicle socket. Drive, then call stop_logging.
+    """
+    try:
+        return drive_logger.start()
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": repr(exc)}
+
+
+# --- 16. stop_logging (DRIVE LOG) -------------------------------------------
+@mcp.tool()
+def stop_logging() -> dict:
+    """Stop the active drive recording and return a summary of the run
+    (duration, distance, top/avg speed, 0-100, throttle/brake %, gear usage)."""
+    try:
+        return drive_logger.stop()
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": repr(exc)}
+
+
+# --- 17. summarize_drive (DRIVE LOG) ----------------------------------------
+@mcp.tool()
+def summarize_drive(path: str | None = None) -> dict:
+    """Summarize a recorded drive CSV (defaults to the most recent in logs/):
+    distance, top/avg speed, 0-100, rpm, throttle/brake %, gear usage, trace."""
+    try:
+        p = path or latest_log()
+        if not p:
+            return {"ok": False, "error": "no drive logs found in logs/"}
+        return summarize_csv(p)
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": repr(exc)}
+
+
+# --- 18. vehicle_lua (ANALYSIS, advanced/local) -----------------------------
+@mcp.tool()
+def vehicle_lua(code: str, vid: str | None = None) -> dict:
+    """ADVANCED (local only): run a Lua chunk on the current vehicle and return
+    its value (end with `return <expr>`). The deep-introspection hook for car
+    analysis — query powertrain power/torque, turbo boost, suspension travel/
+    bottoming, beam stress. Needs the per-vehicle socket (recover the car if it
+    was just respawned).
+    """
+    try:
+        return session.vehicle_lua(code, vid=vid)
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "error": repr(exc)}
 

@@ -95,15 +95,33 @@ def main() -> int:
     p96 = outgauge.parse(packed96)
     check("outgauge.parse 96 has id", p96.get("id") == 7, str(p96.get("id")))
 
-    # 7. server registers the passive-attach tool surface -------------------
+    # 7. server registers the full tool surface -----------------------------
     import server
     tools = server.mcp._tool_manager.list_tools()
     names = {t.name for t in tools}
-    check("server registers >=15 tools", len(tools) >= 15, f"got {len(tools)}")
-    check("passive-attach tools present",
+    check("server registers >=18 tools", len(tools) >= 18, f"got {len(tools)}")
+    check("expected tools present",
           {"connect", "current_vehicles", "telemetry", "get_config",
-           "set_config"} <= names,
+           "set_config", "start_logging", "stop_logging", "summarize_drive",
+           "vehicle_lua"} <= names,
           str(sorted(names)))
+
+    # 8. logger.summarize_csv on a synthetic drive --------------------------
+    import logger
+    import tempfile
+    tmpcsv = os.path.join(tempfile.gettempdir(), "smoke_drive.csv")
+    with open(tmpcsv, "w", newline="") as fh:
+        fh.write("t,speed_kmh,rpm,gear,throttle,brake,clutch,fuel,engTemp\n")
+        for i in range(20):
+            fh.write("%.2f,%.1f,%d,2,1.0,0.0,0.0,%.3f,90\n"
+                     % (i * 0.1, i * 5.0, 2000 + i * 100, 1.0 - i * 0.001))
+    s = logger.summarize_csv(tmpcsv)
+    check("logger.summarize_csv works",
+          s.get("ok") and s.get("samples") == 20, str(s)[:200])
+    try:
+        os.remove(tmpcsv)
+    except OSError:
+        pass
 
     print(f"\n{'ALL PASSED' if not failures else 'FAILURES: ' + ', '.join(failures)}")
     return 1 if failures else 0

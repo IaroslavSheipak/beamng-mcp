@@ -131,14 +131,17 @@ C:\Users\Iaroslav\beamng-mcp\.venv\Scripts\python.exe smoke_test.py
 | `disconnect` | attach | drops the socket; does **not** close your game |
 | `status` | offline | connection state |
 | `current_vehicles` | attach | lists in-game vehicles, flags the player's car (live-tested) |
-| `telemetry` | attach | 126 Electrics channels + Damage/GForces + State; **current car** by default (live-tested) |
-| `get_config` | attach | part-config of your current car |
+| `telemetry` | attach | 126 Electrics channels + Damage/GForces + State (current car); **falls back to GE-state + OutGauge** if the per-vehicle socket is down after a respawn |
+| `get_config` | attach | compact config of your current car: installed parts + tuning vars (GE-side, robust) |
 | `set_config` | attach | apply parts to your current car (respawns it in place) |
 | `list_vehicle_models` | offline | install zips + user dirs + stock fallback |
 | `list_configs` | offline | scans USER_VEHICLES for `*.pc` |
 | `read_pc` / `write_pc` | offline | `.pc` JSON, confined to USER_VEHICLES |
 | `outgauge_telemetry` | offline parser | needs OutGauge enabled in-game |
 | `spawn` / `set_control` / `run_test` | ACTIVE | only when you explicitly ask Claude to spawn / drive / test |
+| `start_logging` / `stop_logging` | drive log | record OutGauge to a CSV in `logs/`; `stop` returns a run summary (robust — no per-vehicle socket) |
+| `summarize_drive` | offline | summarize a recorded drive (distance, top/avg speed, 0–100, gear usage, speed trace) |
+| `vehicle_lua` | analysis | run a Lua chunk on the current car and return its value — deep introspection (powertrain, suspension, beams) for "analyze & improve" |
 
 Every tool returns a JSON object `{"ok": bool, ...}` and never raises across the
 MCP boundary. Tools that need the game return
