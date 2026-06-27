@@ -467,5 +467,57 @@ def wheel_telemetry() -> dict:
         return {"ok": False, "error": repr(exc)}
 
 
+# ===========================================================================
+# IN-GAME TIME TRIAL — set a start/finish line, countdown, auto-timed laps.
+# ===========================================================================
+
+# --- 28. set_start_line ------------------------------------------------------
+@mcp.tool()
+def set_start_line() -> dict:
+    """Mark the car's CURRENT position as the start/finish line and draw a green
+    gate across the track. Drive up to where you want the line, then call this."""
+    try:
+        return session.set_start_line()
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": repr(exc)}
+
+
+# --- 29. start_time_trial ----------------------------------------------------
+@mcp.tool()
+def start_time_trial(countdown: int = 3, hz: float = 30.0) -> dict:
+    """Start an in-game timed lap: shows a 3-2-1-GO countdown on screen, records a
+    rich telemetry lap, and AUTO-FINISHES when you cross the start/finish line
+    again (shows the lap time in-game). Non-blocking — poll time_trial_status to
+    read the result, or stop_time_trial to finish early. Auto-sets the line at
+    your current spot if you haven't set one."""
+    try:
+        return session.start_time_trial(countdown=countdown, hz=hz)
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": repr(exc)}
+
+
+# --- 30. time_trial_status ---------------------------------------------------
+@mcp.tool()
+def time_trial_status() -> dict:
+    """Poll the time trial: state (counting/running/done), live elapsed time, and
+    once finished the lap time + a lap summary (distance, avg/max speed, balance,
+    bottoming, symptoms). The recorded lap also feeds analyze_lap/race_engineer."""
+    try:
+        return session.time_trial_status()
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": repr(exc)}
+
+
+# --- 31. stop_time_trial -----------------------------------------------------
+@mcp.tool()
+def stop_time_trial() -> dict:
+    """Finish the current timed lap NOW (manual finish if you didn't cross the line
+    or want to abort). Returns the lap time + summary."""
+    try:
+        return session.stop_time_trial()
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": repr(exc)}
+
+
 if __name__ == "__main__":
     mcp.run()  # stdio transport (default)

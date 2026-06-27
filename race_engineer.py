@@ -165,6 +165,52 @@ def cmd_swap(kind: str) -> None:
           "are now exposed — run `vars` to see them." % kind)
 
 
+def cmd_build(remove_csv: str, vars_json: str) -> None:
+    """Apply a full build in ONE respawn: remove the given part slots AND set the
+    given $vars, preserving everything else (uses get_part_config, so the current
+    parts + existing tune are kept). For a weight-strip + tune in a single hit."""
+    removes = {s.strip() for s in (remove_csv or "").split(",") if s.strip()}
+    try:
+        varmap = json.loads(vars_json) if vars_json else {}
+    except Exception as exc:  # noqa: BLE001
+        print("bad vars json: %r" % exc)
+        return
+    g = session._require_conn()
+    if g:
+        _pp(g)
+        return
+    changed: list = []
+    with session._lock:
+        vid = session._use_current(None)
+        v = session.vehicles[vid]
+        cfg = v.get_part_config()
+
+        def walk(n):
+            if isinstance(n, dict):
+                sid = n.get("id")
+                if sid in removes and n.get("chosenPartName"):
+                    changed.append((sid, n.get("chosenPartName")))
+                    n["chosenPartName"] = ""
+                for c in (n.get("children") or {}).values():
+                    walk(c)
+
+        walk(cfg.get("partsTree"))
+        varz = cfg.setdefault("vars", {})
+        for k, val in varmap.items():
+            varz[k] = val
+        v.set_part_config(cfg)
+        try:                                   # keep player control after respawn
+            session.bng.vehicles.switch(vid)
+        except Exception:  # noqa: BLE001
+            pass
+    print("removed parts (%d):" % len(changed))
+    for sid, old in changed:
+        print("  %-22s was %s" % (sid, old))
+    if removes and not changed:
+        print("  (none of %s present)" % sorted(removes))
+    print("set vars: %s" % varmap)
+
+
 def cmd_save(name: str) -> None:
     """Persist the car's CURRENT parts + tuning vars to a .pc — GE-side only, so
     it works even when the per-vehicle socket is wedged (survives a game restart)."""
@@ -253,6 +299,9 @@ def main() -> int:
             _pp(session.focus_player())
         elif cmd == "save":
             cmd_save(sys.argv[2] if len(sys.argv) > 2 else "Claude Rally Coilover")
+        elif cmd == "build":
+            cmd_build(sys.argv[2] if len(sys.argv) > 2 else "",
+                      sys.argv[3] if len(sys.argv) > 3 else "")
         elif cmd == "demo":
             cmd_demo()
         else:

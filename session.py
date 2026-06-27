@@ -109,6 +109,11 @@ class Session:
         # Rich per-lap telemetry recorder (race-engineer feature).
         self._lap = lap_telemetry.RichLapRecorder(LOGS_DIR)
         self._lap_vid: str | None = None     # handle cached for the lap recorder
+        # In-game time trial (start/finish line + countdown + auto-timing).
+        self._sl: dict | None = None          # {"pos","dir","ids"}
+        self._tt: dict = {"state": "idle"}     # time-trial run state
+        self._tt_thread: threading.Thread | None = None
+        self._tt_stop = threading.Event()
 
     # ---- helpers -----------------------------------------------------------
     def is_connected(self) -> bool:
@@ -674,6 +679,203 @@ class Session:
         rep = lap_analysis.analyze_lap(lap_telemetry.read_lap_csv(p))
         rep["path"] = p
         return rep
+
+    # ---- in-game time trial (countdown + drawn line + auto-timing) --------
+    @staticmethod
+    def _fmt_time(s: float) -> str:
+        m = int(s // 60)
+        return "%d:%06.3f" % (m, s - m * 60)
+
+    def _ge_msg(self, text: str) -> None:
+        """Show an in-game on-screen message. Best-effort; never raises.
+        Caller must NOT hold self._lock (this acquires it)."""
+        try:
+            with self._lock:
+                self.bng.ui.display_message(text)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _player_vid_ge(self):
+        """Resolve the player vehicle id GE-side (with the post-respawn fallback)."""
+        try:
+            vid = self.bng.vehicles.get_player_vehicle_id().get("vid")
+        except Exception:  # noqa: BLE001
+            vid = None
+        if not vid:
+            try:
+                cur = self.bng.vehicles.get_current_info(include_config=False)
+                if isinstance(cur, dict) and cur:
+                    vid = "thePlayer" if "thePlayer" in cur else next(iter(cur))
+            except Exception:  # noqa: BLE001
+                pass
+        return vid
+
+    def _ge_state(self, vid):
+        """GE-side vehicle state (pos/dir/vel) — socket-immune."""
+        try:
+            st = self.bng.vehicles.get_states([vid])
+            s = st.get(vid) if isinstance(st, dict) else None
+            return s if isinstance(s, dict) else None
+        except Exception:  # noqa: BLE001
+            return None
+
+    def set_start_line(self) -> dict:
+        """Mark the car's CURRENT position as the start/finish line and draw a
+        green gate across the track. GE-side (no per-vehicle socket)."""
+        guard = self._require_conn()
+        if guard:
+            return guard
+        with self._lock:
+            try:
+                vid = self._player_vid_ge()
+                if not vid:
+                    return {"ok": False, "error": "no vehicle to anchor the line"}
+                st = self._ge_state(vid)
+                pos = (st or {}).get("pos")
+                d = (st or {}).get("dir") or [1.0, 0.0, 0.0]
+                if not pos:
+                    return {"ok": False, "error": "could not read car position"}
+                if self._sl and isinstance(self._sl.get("ids"), dict):
+                    try:
+                        self.bng.debug.remove_spheres(self._sl["ids"].get("spheres", []))
+                    except Exception:  # noqa: BLE001
+                        pass
+                    for lid in self._sl["ids"].get("lines", []):
+                        try:
+                            self.bng.debug.remove_polyline(lid)
+                        except Exception:  # noqa: BLE001
+                            pass
+                nx, ny = -d[1], d[0]                # perpendicular in ground plane
+                n = math.hypot(nx, ny) or 1.0
+                nx, ny = nx / n, ny / n
+                half = 6.0
+                a = [pos[0] + nx * half, pos[1] + ny * half, pos[2]]
+                b = [pos[0] - nx * half, pos[1] - ny * half, pos[2]]
+                ids = {"spheres": [], "lines": []}
+                green = (0.1, 1.0, 0.2, 1.0)
+                try:
+                    ids["lines"].append(
+                        self.bng.debug.add_polyline([a, b], green, cling=True))
+                except Exception:  # noqa: BLE001
+                    pass
+                try:
+                    ids["spheres"].extend(self.bng.debug.add_spheres(
+                        [a, b], [0.6, 0.6], [green, green], cling=True, offset=0.6))
+                except Exception:  # noqa: BLE001
+                    pass
+                self._sl = {"pos": list(pos), "dir": list(d), "ids": ids}
+            except Exception as exc:  # noqa: BLE001
+                return _err(exc)
+        self._ge_msg("Start/finish line set - drive a lap")
+        return {"ok": True, "pos": self._sl["pos"],
+                "note": "green gate drawn at your position"}
+
+    def start_time_trial(self, countdown: int = 3, hz: float = 30.0) -> dict:
+        """Countdown (3-2-1-GO on screen) -> records a rich lap -> auto-detects
+        when you cross the start/finish line again -> shows the lap time in-game.
+        Runs in the background; poll time_trial_status / stop_time_trial."""
+        guard = self._require_conn()
+        if guard:
+            return guard
+        if self._tt.get("state") in ("counting", "running"):
+            return {"ok": False, "error": "a time trial is already running",
+                    "state": self._tt.get("state")}
+        if not self._sl:
+            sres = self.set_start_line()        # auto-anchor at current position
+            if not sres.get("ok"):
+                return sres
+        self._tt = {"state": "counting"}
+        self._tt_stop.clear()
+        self._tt_thread = threading.Thread(
+            target=self._tt_run, args=(int(countdown), float(hz)), daemon=True)
+        self._tt_thread.start()
+        return {"ok": True, "state": "counting",
+                "note": "watch the in-game countdown; drive on GO. Lap auto-times "
+                        "when you cross the line. Poll time_trial_status."}
+
+    def _tt_run(self, countdown: int, hz: float) -> None:
+        """Background worker: countdown -> record -> watch for line crossing."""
+        try:
+            with self._lock:
+                vid = self._player_vid_ge()
+            if not vid:
+                self._tt = {"state": "error", "error": "no player vehicle"}
+                return
+            sl = self._sl["pos"]
+            for i in range(max(0, countdown), 0, -1):
+                if self._tt_stop.is_set():
+                    self._tt = {"state": "cancelled"}
+                    return
+                self._ge_msg(str(i))
+                time.sleep(1.0)
+            self._ge_msg("GO!")
+            go = time.time()
+            self._lap_vid = vid
+            self._lap.start(self._poll_rich, hz=hz)
+            self._tt = {"state": "running", "go_time": go}
+            armed = False
+            while not self._tt_stop.is_set():
+                time.sleep(0.15)
+                if time.time() - go > 900:       # safety cap
+                    break
+                with self._lock:
+                    st = self._ge_state(vid)
+                pos = (st or {}).get("pos") if st else None
+                if not pos:
+                    continue
+                dist = math.sqrt(sum((pos[i] - sl[i]) ** 2 for i in range(3)))
+                if not armed and dist > 40.0:    # left the line area
+                    armed = True
+                if armed and dist < 10.0:        # came back across it
+                    break
+            lap_time = time.time() - go
+            stop = self._lap.stop()
+            self._tt = {"state": "done", "lap_time": round(lap_time, 3),
+                        "armed": armed, "csv": stop.get("path"),
+                        "report": stop.get("report")}
+            self._ge_msg("LAP  %s" % self._fmt_time(lap_time))
+        except Exception as exc:  # noqa: BLE001
+            self._tt = {"state": "error", "error": repr(exc)}
+            try:
+                self._lap.stop()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def stop_time_trial(self) -> dict:
+        """Finish the current trial NOW (manual finish if the auto-line missed)."""
+        if self._tt.get("state") in ("counting", "running"):
+            self._tt_stop.set()
+            if self._tt_thread is not None:
+                self._tt_thread.join(timeout=4.0)
+        return self.time_trial_status()
+
+    def time_trial_status(self) -> dict:
+        """Compact status of the time trial (state, elapsed, lap_time, summary)."""
+        tt = dict(self._tt)
+        state = tt.get("state", "idle")
+        out: dict = {"ok": True, "state": state, "line_set": self._sl is not None}
+        if state == "running" and tt.get("go_time"):
+            el = time.time() - tt["go_time"]
+            out["elapsed_s"] = round(el, 2)
+            out["elapsed"] = self._fmt_time(el)
+        if tt.get("lap_time") is not None:
+            out["lap_time_s"] = tt["lap_time"]
+            out["lap_time"] = self._fmt_time(tt["lap_time"])
+            out["armed"] = tt.get("armed")
+            out["csv"] = tt.get("csv")
+            rep = tt.get("report")
+            if isinstance(rep, dict) and rep.get("ok"):
+                sp = rep.get("speed") or {}
+                out["summary"] = {
+                    "distance_m": rep.get("distance_m"),
+                    "avg_kmh": sp.get("avg_kmh"), "max_kmh": sp.get("max_kmh"),
+                    "balance": (rep.get("balance") or {}).get("interpretation"),
+                    "bottoming": (rep.get("ride") or {}).get("bottoming_events"),
+                    "symptoms": rep.get("symptoms"),
+                }
+        if tt.get("error"):
+            out["error"] = tt["error"]
+        return out
 
     # ---- race engineer: tuning surface + apply ----------------------------
     def get_tuning_full(self, vid=None) -> dict:
