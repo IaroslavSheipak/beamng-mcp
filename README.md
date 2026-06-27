@@ -142,11 +142,72 @@ C:\Users\Iaroslav\beamng-mcp\.venv\Scripts\python.exe smoke_test.py
 | `start_logging` / `stop_logging` | drive log | record OutGauge to a CSV in `logs/`; `stop` returns a run summary (robust — no per-vehicle socket) |
 | `summarize_drive` | offline | summarize a recorded drive (distance, top/avg speed, 0–100, gear usage, speed trace) |
 | `vehicle_lua` | analysis | run a Lua chunk on the current car and return its value — deep introspection (powertrain, suspension, beams) for "analyze & improve" |
+| `start_lap` / `stop_lap` | race engineer | record a **rich** telemetry lap (lat/long/vert G, yaw heading, steering, throttle/brake) at ~30 Hz; `stop` auto-analyzes it |
+| `analyze_lap` | offline | turn a recorded lap into engineer metrics: grip/friction-circle, understeer↔oversteer **balance index per corner phase**, braking, ride/bottoming, auto-detected symptoms |
+| `race_engineer` | **headline** | tell it the *feel* ("understeer on entry", "rear loose on throttle"); it cross-references your words + lap telemetry + the car's real `$vars` → a ranked, specific setup plan + pit-wall brief |
+| `get_tuning_full` | attach | the car's **full** tunable surface (every `$var` with live val/default/min/max/unit/title) from the vehicle VM — what the in-game Tuning menu sees |
+| `set_tuning` / `apply_setup` | attach | apply tuning `$vars` (clamped to live min/max; **respawns** like the Tuning menu's Apply); `apply_setup` takes a `race_engineer` plan and can persist a `.pc` |
+| `set_tire_pressure` | attach | set front/rear tire psi **LIVE** (no respawn) via the vehicle's pressure groups |
+| `wheel_telemetry` | analysis | per-wheel Lua probe: wheelSpeed, angularVelocity, brake surface temp (lockup / brake-bias / thermal inference) |
 
 Every tool returns a JSON object `{"ok": bool, ...}` and never raises across the
 MCP boundary. Tools that need the game return
 `{"ok": false, "error": "not connected; call connect first"}` (or a clear
 per-vehicle error) instead of a traceback.
+
+## AI Race Engineer (the "drive a lap, tune like F1" loop)
+
+The headline workflow: **drive → describe the feel → get a telemetry-grounded
+setup change** on the car's real tuning sliders, like a race engineer on the pit
+wall (her name is Mara).
+
+1. **Drive a lap.** `start_lap()` records rich telemetry (lateral/longitudinal/
+   vertical G from GForces, yaw from heading, steering, throttle/brake,
+   wheelspeed) at ~30 Hz to `logs/lap_*.csv`. `stop_lap()` ends it and
+   auto-analyzes.
+2. **Tell the engineer how it felt** in plain language — `race_engineer("understeer
+   on entry, then the rear steps out on throttle")`. It:
+   - parses your words into per-phase symptoms (entry/mid/exit/braking/kerb),
+   - merges them with the **telemetry-detected** symptoms from the lap
+     (agreement boosts confidence; the lap can confirm or contradict the feel),
+   - reads the car's **real** tunable `$vars` (`get_tuning_full`, from the vehicle
+     VM — the same list the in-game Tuning menu shows, with live min/max),
+   - returns a **ranked, specific plan**: which slider, which way, how much, and
+     why — e.g. *"P1 soften front anti-roll bar `$arb_spring_F` 45000→39600
+     (−12%)"* — plus a pit-wall brief.
+3. **Apply it.** `apply_setup(plan=...)` (or `set_tuning({"$arb_spring_F": 39600})`)
+   writes the vars — clamped to the car's live range — and respawns the car
+   (exactly like the Tuning menu's *Apply*). `save_as` persists a `.pc`.
+   `set_tire_pressure(24, 26)` is a **live** trim (no respawn).
+4. **Re-drive and confirm.** One change at a time; re-record; compare the balance
+   index before/after.
+
+What it tunes (resolved per-car at runtime, never hardcoded): springs, anti-roll
+bars, **bump & rebound damping**, ride height, camber, toe, caster, brake bias,
+differential (preload / power / coast), tire pressure — whichever the installed
+parts actually expose. The knowledge base is grounded in sim-racing/motorsport
+setup theory (iRacing/ACC/MoTeC); the analysis implements MoTeC-style metrics
+(friction circle, understeer/balance index, per-corner segmentation).
+
+**Honest limits (consumer build).** The balance index uses the normalized
+`steering` channel (−1..1, not road-wheel degrees), so it is **relative/trend**
+(great for before/after deltas, not absolute degrees). There is no suspension-
+travel channel, so the true damper-velocity histogram degrades to a gz-based
+bottoming/settle proxy — but you can still **tune the rebound `$vars` directly**.
+Geometry vars (camber/toe/caster) are unitless multipliers whose jbeam min/max can
+be reversed, so those moves are flagged low-confidence ("verify in-game").
+
+**Suspension note (etk800).** The stock/lifted struts expose **no** spring/damper
+sliders; the **Rally** or **Race** coilovers expose spring + bump + rebound (Rally
+also adds fast-bump and keeps adjustable ride height). `race_engineer.py swap
+rally` fits them. Enumerate first with `get_tuning_full` — the engineer degrades
+gracefully to whatever the car exposes (e.g. ARB + diff + brake bias if dampers
+aren't available).
+
+There's a `race_engineer.py` CLI that drives this whole loop against a live game
+(it reuses the same `session.py` code the MCP serves): `vars`, `record <secs>`,
+`analyze`, `advise "<feel>"`, `apply '<$var json>'`, `pressure <f> <r>`,
+`swap rally|race`, and `demo` (an end-to-end live self-check).
 
 ### `.pc` config confinement (security)
 

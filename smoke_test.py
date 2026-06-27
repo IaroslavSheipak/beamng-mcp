@@ -123,6 +123,59 @@ def main() -> int:
     except OSError:
         pass
 
+    # 9. race-engineer pipeline (offline, synthetic lap) --------------------
+    import csv as _csv
+    import engineer
+    import engineer_kb
+    import lap_analysis
+    import lap_telemetry
+
+    check("race-engineer tools present",
+          {"start_lap", "stop_lap", "analyze_lap", "race_engineer",
+           "get_tuning_full", "set_tuning", "apply_setup",
+           "set_tire_pressure", "wheel_telemetry"} <= names,
+          str(sorted(names)))
+
+    # KB sign-convention monotonicity (raises on any backwards-advice sign flip).
+    try:
+        engineer_kb._selftest()
+        kb_ok, kb_err = True, ""
+    except Exception as exc:  # noqa: BLE001
+        kb_ok, kb_err = False, repr(exc)
+    check("engineer_kb sign conventions (no backwards advice)", kb_ok, kb_err)
+
+    # Synthetic understeer lap -> RICH_FIELDS csv -> read back -> analyze.
+    us_rows = lap_analysis._synth_corner(0.8)
+    lapcsv = os.path.join(tempfile.gettempdir(), "smoke_lap.csv")
+    with open(lapcsv, "w", newline="") as fh:
+        w = _csv.writer(fh)
+        w.writerow(lap_telemetry.RICH_FIELDS)
+        for r in us_rows:
+            w.writerow([r.get(f, "") for f in lap_telemetry.RICH_FIELDS])
+    rep = lap_analysis.analyze_lap(lap_telemetry.read_lap_csv(lapcsv))
+    check("analyze_lap detects understeer on synthetic lap",
+          rep.get("ok") and rep["balance"]["overall_index"] > 0
+          and any(s["symptom"] == "understeer" for s in rep["symptoms"]),
+          str(rep.get("balance")))
+
+    # Full diagnose -> plan -> $var map against a realistic available-vars dict.
+    avail = {"$arb_spring_F": 45000.0, "$arb_spring_R": 25000.0,
+             "$brakebias": 0.68, "$tirepressure_F": 20.0}
+    diag = engineer.diagnose("understeer on entry", rep, avail)
+    vmap = engineer.plan_to_vars(diag.get("plan", []), avail)
+    check("race engineer softens front ARB for understeer",
+          diag.get("ok") and any(
+              it["var"] == "$arb_spring_F" and it["proposed"] < 45000
+              for it in diag["plan"]),
+          str([(it["var"], it.get("proposed")) for it in diag.get("plan", [])]))
+    check("plan_to_vars emits only in-range $-vars",
+          bool(vmap) and all(k.startswith("$") for k in vmap),
+          str(vmap))
+    try:
+        os.remove(lapcsv)
+    except OSError:
+        pass
+
     print(f"\n{'ALL PASSED' if not failures else 'FAILURES: ' + ', '.join(failures)}")
     return 1 if failures else 0
 

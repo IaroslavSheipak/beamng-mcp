@@ -11,6 +11,8 @@ GPS/RoadsSensor/IdealRadar) are used anywhere.
 
 from __future__ import annotations
 
+import json
+import math
 import os
 import threading
 import time
@@ -18,13 +20,51 @@ import time
 from beamngpy import BeamNGpy, Scenario, Vehicle
 from beamngpy.sensors import Damage, Electrics, GForces
 
+import engineer
+import lap_analysis
+import lap_telemetry
 import outgauge
 import pc_config
+from logger import LOGS_DIR
 
 DEFAULT_HOST = os.environ.get("BEAMNG_HOST", "127.0.0.1")
 DEFAULT_PORT = int(os.environ.get("BEAMNG_PORT", "25252"))
 
 _HINT = "is BeamNG.drive running and allowed through Windows Firewall?"
+
+# --- Race-engineer telemetry mapping (verified against the game source) -------
+# GForces sensor axes (lua/vehicle/sensors.lua + hydros.lua): gx = LATERAL,
+# gy = LONGITUDINAL, gz = VERTICAL, in m/s^2 (gravity-inclusive: gz ~= -9.8 at
+# rest). lap_analysis wants gx = longitudinal (forward +, decel -), gy = lateral,
+# gz = vertical (~+1 g static), all in g. So we SWAP gy<->gx and divide by G.
+G = 9.80665
+# Signs are sign-checkable live (lap_analysis flags this); flip a constant if a
+# known brake/corner shows the wrong sign. Defaults: decel -> negative gx,
+# vertical negated so a resting car reads ~+1 g (bump/compression spikes go +).
+GF_LONG_SIGN = 1.0   # analysis gx = GF_LONG_SIGN * beamng.gy / G
+GF_LAT_SIGN = 1.0    # analysis gy = GF_LAT_SIGN  * beamng.gx / G  (left/right label only)
+GF_VERT_SIGN = -1.0  # analysis gz = GF_VERT_SIGN * beamng.gz / G  (~+1 g static)
+
+# The Lua chunk that returns the FULL tunable surface (every $var with live
+# val/default/min/max/unit/title/category) from the vehicle VM — what the in-game
+# Tuning menu uses. Far richer than GE get_current_info's saved-vars subset.
+_FULL_VARS_LUA = (
+    "local function cnt(t) local n=0 for _ in pairs(t) do n=n+1 end return n end "
+    "if v and v.data and v.data.variables then local out={} "
+    "for k,def in pairs(v.data.variables) do out[k]={val=def.val,default=def.default,"
+    "min=def.min,max=def.max,unit=def.unit,title=def.title,category=def.category} end "
+    "return jsonEncode({ok=true,count=cnt(out),vars=out}) "
+    "else return jsonEncode({ok=false,reason='no v.data.variables'}) end"
+)
+
+# Per-wheel Lua probe (slip/brake-temp) — the non-hallucinated per-corner path.
+_WHEELS_LUA = (
+    "local out={} if wheels and wheels.wheels then "
+    "for i=0,tableSizeC(wheels.wheels)-1 do local wh=wheels.wheels[i] if wh then "
+    "out[#out+1]={name=wh.name,wheelSpeed=wh.wheelSpeed,angularVelocity=wh.angularVelocity,"
+    "brakeTemp=wh.brakeSurfaceTemperature,pressureGroup=wh.pressureGroup} end end end "
+    "return jsonEncode({ok=true,wheels=out})"
+)
 
 
 def _err(exc: Exception, hint: bool = True) -> dict:
@@ -66,6 +106,9 @@ class Session:
         self.host = DEFAULT_HOST
         self.port = DEFAULT_PORT
         self._lock = threading.Lock()
+        # Rich per-lap telemetry recorder (race-engineer feature).
+        self._lap = lap_telemetry.RichLapRecorder(LOGS_DIR)
+        self._lap_vid: str | None = None     # handle cached for the lap recorder
 
     # ---- helpers -----------------------------------------------------------
     def is_connected(self) -> bool:
@@ -107,8 +150,22 @@ class Session:
         KeyError('result')). That failed attempt primes the vehicle-side
         extension, so we retry with a FRESH (port=None) Vehicle each time."""
         if vid is None:
-            player = self.bng.vehicles.get_player_vehicle_id()
-            vid = player.get("vid")
+            try:
+                player = self.bng.vehicles.get_player_vehicle_id()
+                vid = player.get("vid") if isinstance(player, dict) else None
+            except Exception:  # noqa: BLE001
+                vid = None
+            if not vid:
+                # After a set_part_config respawn the game can drop the
+                # player-vehicle pointer (get_player_vehicle_id -> null) while the
+                # car still exists. Fall back to the current vehicle (prefer one
+                # named 'thePlayer', else the sole/first vehicle present).
+                try:
+                    cur = self.bng.vehicles.get_current_info(include_config=False)
+                except Exception:  # noqa: BLE001
+                    cur = {}
+                if isinstance(cur, dict) and cur:
+                    vid = "thePlayer" if "thePlayer" in cur else next(iter(cur))
             if not vid:
                 raise RuntimeError("no active player vehicle in the running game")
         if vid in self.vehicles:
@@ -129,6 +186,17 @@ class Session:
             except Exception as exc:  # noqa: BLE001 — first attempt primes the veh
                 last_exc = exc
                 time.sleep(1.0)
+        # Repeated KeyError('result') after the priming retries == the per-vehicle
+        # socket is wedged game-side (known BeamNG state after heavy respawn/
+        # reconnect churn). GE-side reads still work; live sensors/Lua do not.
+        if last_exc is not None and "result" in repr(last_exc):
+            raise RuntimeError(
+                "per-vehicle socket wedged (KeyError('result') after %d retries) — "
+                "a known BeamNG state after repeated respawns/reconnects. GE reads "
+                "still work, but live sensors/Lua need a clean socket. Fix: restart "
+                "BeamNG.drive, reopen the tech socket (openServer 25252), reconnect. "
+                "To AVOID it, use the persistent MCP connection (one session) rather "
+                "than many short-lived reconnects." % 5)
         raise last_exc if last_exc else RuntimeError("vehicle connect failed")
 
     def current_vehicles(self) -> dict:
@@ -193,7 +261,16 @@ class Session:
                 self.scenario = None
                 self.vehicles = {}
                 self.sensors = {}
+                self._lap_vid = None
             return {"ok": True, "connected": False}
+
+    def reconnect(self) -> dict:
+        """Cleanly close and reopen the GE connection — recovers a stale GE session
+        (e.g. after the game was restarted) without manual disconnect/connect.
+        Does NOT clear a game-side per-vehicle wedge; that needs a BeamNG restart."""
+        home, user, host, port = self.home, self.user, self.host, self.port
+        self.disconnect()
+        return self.connect(home=home, user=user, host=host, port=port, launch=False)
 
     def status(self) -> dict:
         return {
@@ -469,6 +546,359 @@ class Session:
             except Exception:  # noqa: BLE001
                 pass
             return _err(exc)
+
+
+    # ---- race engineer: rich lap telemetry --------------------------------
+    @staticmethod
+    def _num(x):
+        """Coerce booleans to 0/1, pass numbers through, else None."""
+        if isinstance(x, bool):
+            return int(x)
+        return x if isinstance(x, (int, float)) else None
+
+    def _poll_rich(self) -> dict:
+        """poll_fn for RichLapRecorder: one rich telemetry row of the player car.
+
+        Acquires the lock only for the sensor poll (released before the recorder
+        sleeps, per the run_test pattern). Maps BeamNG GForces (gx=lateral,
+        gy=longitudinal, gz=vertical, m/s^2) onto lap_analysis' convention
+        (gx=longitudinal, gy=lateral, gz vertical ~+1 g) in g-units."""
+        with self._lock:
+            # Reuse the handle primed in start_lap — do NOT re-run the per-vehicle
+            # handshake every poll (that churn is what wedges the socket). Only
+            # re-resolve if the handle was lost (e.g. a respawn mid-lap).
+            vid = self._lap_vid
+            if vid is None or vid not in self.vehicles:
+                vid = self._use_current(None)
+                self._lap_vid = vid
+            v = self.vehicles[vid]
+            v.poll_sensors()
+            e = dict(v.sensors["electrics"])
+            gf = dict(v.sensors["gforces"])
+            st = dict(v.state)
+        pos = st.get("pos") or [None, None, None]
+        vel = st.get("vel") or [0.0, 0.0, 0.0]
+        d = st.get("dir") or [1.0, 0.0, 0.0]
+        speed = math.sqrt(sum((c or 0.0) ** 2 for c in vel))
+        heading = math.atan2(d[1] or 0.0, d[0] or 0.0)        # radians
+        bgx, bgy, bgz = gf.get("gx") or 0.0, gf.get("gy") or 0.0, gf.get("gz") or 0.0
+
+        def ch(*names):
+            for k in names:
+                if e.get(k) is not None:
+                    return self._num(e[k])
+            return None
+
+        return {
+            "speed": speed,
+            "posx": pos[0], "posy": pos[1], "posz": pos[2],
+            "heading": heading,
+            "gx": GF_LONG_SIGN * bgy / G,     # longitudinal (forward +, decel -)
+            "gy": GF_LAT_SIGN * bgx / G,      # lateral
+            "gz": GF_VERT_SIGN * bgz / G,     # vertical (~+1 g static)
+            "rpm": ch("rpm"),
+            "gear": ch("gear_index", "gear"),
+            "throttle": ch("throttle"),
+            "brake": ch("brake"),
+            "brakeF": ch("brakeF"),
+            "brakeR": ch("brakeR"),
+            "steering": ch("steering"),
+            "steering_input": ch("steering_input"),
+            "clutch": ch("clutch"),
+            "boost": ch("boost", "turboBoost"),
+            "wheelspeed": ch("wheelspeed"),
+            "abs_active": ch("abs_active"),
+            "tcs_active": ch("tcs_active"),
+            "esc_active": ch("esc_active"),
+        }
+
+    def start_lap(self, hz: float = 30.0) -> dict:
+        """Begin recording a rich telemetry lap of the car you're driving."""
+        guard = self._require_conn()
+        if guard:
+            return guard
+        try:                                   # prime the socket so poll 1 is fast
+            with self._lock:
+                self._lap_vid = self._use_current(None)
+        except Exception as exc:  # noqa: BLE001
+            return _err(exc)
+        return self._lap.start(self._poll_rich, hz=hz)
+
+    def stop_lap(self) -> dict:
+        """Stop the lap recording and auto-analyze it (grip / balance / ride)."""
+        res = self._lap.stop()
+        if res.get("ok") and res.get("path"):
+            try:
+                rep = lap_analysis.analyze_lap(
+                    lap_telemetry.read_lap_csv(res["path"]))
+                res["report"] = rep
+            except Exception as exc:  # noqa: BLE001
+                res["analyze_error"] = repr(exc)
+        return res
+
+    def lap_status(self) -> dict:
+        return self._lap.status()
+
+    def focus_player(self, vid=None) -> dict:
+        """Re-assert player control of a vehicle (bng.vehicles.switch). Fixes the
+        'stationary car, controls dead' state a set_part_config respawn can leave
+        when the game drops the player-vehicle pointer."""
+        guard = self._require_conn()
+        if guard:
+            return guard
+        with self._lock:
+            try:
+                if vid is None:
+                    try:
+                        vid = self.bng.vehicles.get_player_vehicle_id().get("vid")
+                    except Exception:  # noqa: BLE001
+                        vid = None
+                    if not vid:
+                        cur = self.bng.vehicles.get_current_info(include_config=False)
+                        if isinstance(cur, dict) and cur:
+                            vid = "thePlayer" if "thePlayer" in cur else next(iter(cur))
+                if not vid:
+                    return {"ok": False, "error": "no vehicle present to focus"}
+                self.bng.vehicles.switch(vid)
+                return {"ok": True, "vid": vid,
+                        "note": "player control switched to this vehicle"}
+            except Exception as exc:  # noqa: BLE001
+                return _err(exc)
+
+    def analyze_lap_file(self, path: str | None = None) -> dict:
+        """Analyze a recorded lap CSV (default: most recent) into a report."""
+        p = path or lap_telemetry.latest_lap(LOGS_DIR)
+        if not p:
+            return {"ok": False,
+                    "error": "no lap recordings in logs/ — run start_lap/stop_lap first"}
+        rep = lap_analysis.analyze_lap(lap_telemetry.read_lap_csv(p))
+        rep["path"] = p
+        return rep
+
+    # ---- race engineer: tuning surface + apply ----------------------------
+    def get_tuning_full(self, vid=None) -> dict:
+        """Full tunable $var surface (val/default/min/max/unit/title/category) read
+        from the vehicle VM's v.data.variables — the in-game Tuning menu's source,
+        far richer than get_current_info's saved-vars subset."""
+        guard = self._require_conn()
+        if guard:
+            return guard
+        res = self.vehicle_lua(_FULL_VARS_LUA, vid=vid)
+        if not res.get("ok"):
+            return res
+        raw = res.get("result")
+        try:
+            data = json.loads(raw) if isinstance(raw, str) else raw
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": "could not parse vars: %r" % exc, "raw": raw}
+        if not isinstance(data, dict) or not data.get("ok"):
+            return {"ok": False, "error": "vehicle exposes no variables table",
+                    "raw": data}
+        return {"ok": True, "vid": res.get("vid"), "count": data.get("count"),
+                "vars": data.get("vars", {})}
+
+    def _live_ranges(self, vid=None) -> dict:
+        """{$var: (lo, hi)} from the live surface (min/max may be reversed)."""
+        full = self.get_tuning_full(vid)
+        ranges: dict = {}
+        if full.get("ok"):
+            for k, meta in full["vars"].items():
+                try:
+                    lo, hi = float(meta.get("min")), float(meta.get("max"))
+                    ranges[k] = (min(lo, hi), max(lo, hi))
+                except (TypeError, ValueError):
+                    pass
+        return ranges
+
+    def set_tuning_vars(self, vars_map: dict, vid=None) -> dict:
+        """Apply tuning $vars to the current car via set_part_config (RESPAWNS).
+
+        Values are clamped to the car's live min/max. Reuses the connected vehicle
+        handle (avoids the wedge-prone fresh-handshake) per the build notes."""
+        guard = self._require_conn()
+        if guard:
+            return guard
+        if not isinstance(vars_map, dict) or not vars_map:
+            return {"ok": False, "error": 'vars must be a non-empty {"$var": value} dict'}
+        ranges = self._live_ranges(vid)
+        applied: dict = {}
+        skipped: dict = {}
+        for k, val in vars_map.items():
+            if not isinstance(k, str) or not k.startswith("$"):
+                skipped[k] = "not a $var"
+                continue
+            try:
+                fv = float(val)
+            except (TypeError, ValueError):
+                skipped[k] = "non-numeric"
+                continue
+            if k in ranges:
+                lo, hi = ranges[k]
+                fv = lo if fv < lo else hi if fv > hi else fv
+            applied[k] = fv
+        if not applied:
+            return {"ok": False, "error": "no applicable $vars", "skipped": skipped}
+        with self._lock:
+            try:
+                vid = self._use_current(vid)
+                v = self.vehicles[vid]
+                cfg = v.get_part_config()
+                varz = cfg.get("vars")
+                if not isinstance(varz, dict):
+                    varz = {}
+                    cfg["vars"] = varz
+                varz.update(applied)
+                v.set_part_config(cfg)        # respawns (repairs/resets)
+                # The respawn can drop the player-vehicle pointer (dead controls);
+                # re-assert it so the user keeps driving.
+                try:
+                    self.bng.vehicles.switch(vid)
+                except Exception:  # noqa: BLE001
+                    pass
+                try:
+                    v.poll_sensors()
+                except Exception:  # noqa: BLE001 — socket re-priming after respawn
+                    pass
+                return {"ok": True, "vid": vid, "applied": applied, "skipped": skipped,
+                        "respawned": True,
+                        "note": "applied via set_part_config — car respawned "
+                                "(repaired/reset to spawn). Re-drive to confirm."}
+            except Exception as exc:  # noqa: BLE001
+                return _err(exc)
+
+    def set_tire_pressure(self, psi_f: float | None = None,
+                          psi_r: float | None = None, vid=None) -> dict:
+        """LIVE tire-pressure change (no respawn) via obj:setGroupPressure on the
+        front/rear wheel groups. Pressure is absolute Pa = gauge_psi*6894.757+101325."""
+        guard = self._require_conn()
+        if guard:
+            return guard
+        if psi_f is None and psi_r is None:
+            return {"ok": False, "error": "pass psi_f and/or psi_r"}
+        pf = "nil" if psi_f is None else repr(float(psi_f))
+        pr = "nil" if psi_r is None else repr(float(psi_r))
+        lua = (
+            "local pf,pr=%s,%s local done={} "
+            "if wheels and wheels.wheels then "
+            "for i=0,tableSizeC(wheels.wheels)-1 do local wh=wheels.wheels[i] "
+            "if wh and wh.name then local n=string.upper(wh.name) "
+            "local p=nil if string.sub(n,1,1)=='F' and pf then p=pf "
+            "elseif string.sub(n,1,1)=='R' and pr then p=pr end "
+            "if p and wh.pressureGroup then obj:setGroupPressure(wh.pressureGroup,p*6894.757+101325) "
+            "done[#done+1]={wh.name,p} end end end end "
+            "return jsonEncode({ok=true,set=done})" % (pf, pr)
+        )
+        res = self.vehicle_lua(lua, vid=vid)
+        if not res.get("ok"):
+            return res
+        raw = res.get("result")
+        try:
+            data = json.loads(raw) if isinstance(raw, str) else raw
+        except Exception:  # noqa: BLE001
+            data = {"raw": raw}
+        return {"ok": True, "vid": res.get("vid"), "live": True,
+                "psi_f": psi_f, "psi_r": psi_r, "result": data,
+                "note": "live pressure change — no respawn. Persists until reload."}
+
+    def wheel_telemetry(self, vid=None) -> dict:
+        """Per-wheel Lua probe: name, wheelSpeed, angularVelocity, brakeTemp."""
+        guard = self._require_conn()
+        if guard:
+            return guard
+        res = self.vehicle_lua(_WHEELS_LUA, vid=vid)
+        if not res.get("ok"):
+            return res
+        raw = res.get("result")
+        try:
+            data = json.loads(raw) if isinstance(raw, str) else raw
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": "parse: %r" % exc, "raw": raw}
+        return {"ok": True, "vid": res.get("vid"), "wheels": data.get("wheels", [])}
+
+    # ---- race engineer: the headline orchestration ------------------------
+    def race_engineer(self, feedback: str, lap_path: str | None = None,
+                      analyze: bool = True) -> dict:
+        """THE headline tool. Driver feelings (+ the recorded lap) -> a ranked,
+        car-specific setup plan on real tuning $vars, with a pit-wall brief."""
+        guard = self._require_conn()
+        if guard:
+            return guard
+        full = self.get_tuning_full()
+        available: dict = {}
+        if full.get("ok"):
+            for k, meta in full["vars"].items():
+                try:
+                    available[k] = float(meta.get("val"))
+                except (TypeError, ValueError):
+                    pass
+        report = None
+        if analyze:
+            p = lap_path or lap_telemetry.latest_lap(LOGS_DIR)
+            if p:
+                try:
+                    report = lap_analysis.analyze_lap(lap_telemetry.read_lap_csv(p))
+                    report["path"] = p
+                except Exception as exc:  # noqa: BLE001
+                    report = {"ok": False, "error": repr(exc)}
+        live_report = report if (report and report.get("ok")) else None
+        diag = engineer.diagnose(feedback or "", live_report, available)
+        # Clamp proposals to the car's live min/max and annotate unit/title.
+        if full.get("ok"):
+            for it in diag.get("plan", []):
+                meta = full["vars"].get(it.get("var"))
+                if not meta:
+                    continue
+                try:
+                    lo, hi = float(meta["min"]), float(meta["max"])
+                    lo, hi = min(lo, hi), max(lo, hi)
+                    if it.get("proposed") is not None:
+                        it["proposed"] = max(lo, min(hi, it["proposed"]))
+                    it["unit"] = meta.get("unit")
+                    it["title"] = meta.get("title")
+                except (TypeError, ValueError, KeyError):
+                    pass
+        brief = engineer.format_report(live_report, diag)
+        return {"ok": True, "engineer": engineer.ENGINEER, "brief": brief,
+                "diagnosis": diag, "report": report, "tunable_vars": len(available)}
+
+    def apply_setup(self, plan: list | None = None, vars: dict | None = None,
+                    save_as: str | None = None, vid=None) -> dict:
+        """Apply a race_engineer plan (or an explicit {$var:val} map) to the car;
+        optionally persist it as a .pc build."""
+        guard = self._require_conn()
+        if guard:
+            return guard
+        if isinstance(vars, dict) and vars:
+            vmap = vars
+        elif isinstance(plan, list):
+            vmap = engineer.plan_to_vars(plan, {})
+        else:
+            vmap = None
+        if not vmap:
+            return {"ok": False,
+                    "error": 'nothing to apply: pass plan=[...] or vars={"$var":value}'}
+        res = self.set_tuning_vars(vmap, vid=vid)
+        if res.get("ok") and save_as:
+            res["saved"] = self._save_pc(save_as, vid=vid)
+        return res
+
+    def _save_pc(self, name: str, vid=None) -> dict:
+        """Flatten current parts + tuning vars and write a persistent .pc."""
+        with self._lock:
+            vid = self._use_current(vid)
+            v = self.vehicles[vid]
+            cfg = v.get_part_config()
+        try:
+            info = self.bng.vehicles.get_current_info(include_config=False).get(vid, {})
+            model = info.get("model")
+        except Exception:  # noqa: BLE001
+            model = None
+        if not model:
+            return {"ok": False, "error": "could not resolve vehicle model"}
+        parts = _parts_summary(cfg.get("partsTree")) or cfg.get("parts") or {}
+        varz = cfg.get("vars") or {}
+        pc = {"format": 2, "model": model, "parts": parts, "vars": varz}
+        return pc_config.write_pc(model, name, pc)
 
 
 # Module-level singleton.
