@@ -727,12 +727,14 @@ class Session:
             return guard
         with self._lock:
             try:
-                vid = self._player_vid_ge()
-                if not vid:
-                    return {"ok": False, "error": "no vehicle to anchor the line"}
-                st = self._ge_state(vid)
-                pos = (st or {}).get("pos")
-                d = (st or {}).get("dir") or [1.0, 0.0, 0.0]
+                # Connect the car and read its state directly (get_states returns
+                # empty on this build; the connected handle's .state is reliable).
+                vid = self._use_current(None)
+                v = self.vehicles[vid]
+                v.poll_sensors()
+                st = dict(v.state)
+                pos = st.get("pos")
+                d = st.get("dir") or [1.0, 0.0, 0.0]
                 if not pos:
                     return {"ok": False, "error": "could not read car position"}
                 if self._sl and isinstance(self._sl.get("ids"), dict):
@@ -797,10 +799,7 @@ class Session:
         """Background worker: countdown -> record -> watch for line crossing."""
         try:
             with self._lock:
-                vid = self._player_vid_ge()
-            if not vid:
-                self._tt = {"state": "error", "error": "no player vehicle"}
-                return
+                vid = self._use_current(None)     # connect (cache the handle)
             sl = self._sl["pos"]
             for i in range(max(0, countdown), 0, -1):
                 if self._tt_stop.is_set():
@@ -819,8 +818,9 @@ class Session:
                 if time.time() - go > 900:       # safety cap
                     break
                 with self._lock:
-                    st = self._ge_state(vid)
-                pos = (st or {}).get("pos") if st else None
+                    v = self.vehicles.get(vid)
+                    # recorder thread keeps v.state fresh via poll_sensors
+                    pos = dict(v.state).get("pos") if v is not None else None
                 if not pos:
                     continue
                 dist = math.sqrt(sum((pos[i] - sl[i]) ** 2 for i in range(3)))
