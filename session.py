@@ -1281,5 +1281,124 @@ class Session:
         return pc_config.write_pc(model, name, pc)
 
 
+    # ---- fitment-aware part editing (the documented suitablePartNames tree) -
+    def list_parts(self, filter: str | None = None, vid=None) -> dict:
+        """List the car's part slots from the live part TREE (get_part_config).
+        Each slot shows its current part; WITH a filter it also shows the valid
+        options (`suitablePartNames` — the authoritative fitment list the in-game
+        parts menu uses). This is how to see what actually fits before swapping."""
+        guard = self._require_conn()
+        if guard:
+            return guard
+        with self._lock:
+            try:
+                vid = self._use_current(vid)
+                cfg = self.vehicles[vid].get_part_config()
+            except Exception as exc:  # noqa: BLE001
+                return _err(exc)
+        f = filter.lower() if filter else None
+        out: dict = {}
+
+        def walk(n):
+            if isinstance(n, dict):
+                sid = n.get("id")
+                ch = n.get("chosenPartName")
+                suit = n.get("suitablePartNames") or []
+                if sid:
+                    hit = (f is None or f in sid.lower() or f in (ch or "").lower()
+                           or any(f in (p or "").lower() for p in suit))
+                    if hit:
+                        out[sid] = ({"current": ch, "options": suit} if f
+                                    else {"current": ch, "n_options": len(suit)})
+                for c in (n.get("children") or {}).values():
+                    walk(c)
+
+        walk(cfg.get("partsTree"))
+        return {"ok": True, "vid": vid, "filter": filter, "count": len(out),
+                "slots": out,
+                "note": ("filtered: shows valid options per slot" if f else
+                         "overview; pass filter='suspension'|'wheel'|'diff'|"
+                         "'transfer'|'rally'... to see fitting options")}
+
+    def swap_parts(self, changes: dict, vid=None) -> dict:
+        """Fitment-safe part swap. changes = {slot_id: part_name} ("" empties the
+        slot). Each choice is VALIDATED against that slot's suitablePartNames, then
+        applied via set_part_config, ITERATING the respawn cascade (a new parent
+        part exposes new child slots) until everything settles. No guessing, no
+        broken .pc. Tuning vars may reset — re-apply with set_tuning after."""
+        guard = self._require_conn()
+        if guard:
+            return guard
+        if not isinstance(changes, dict) or not changes:
+            return {"ok": False, "error": "changes must be a non-empty {slot: part} dict"}
+        remaining = dict(changes)
+        applied: dict = {}
+        invalid: dict = {}
+        passes = 0
+        with self._lock:
+            try:
+                vid = self._use_current(vid)
+                v = self.vehicles[vid]
+                for _ in range(6):
+                    if not remaining:
+                        break
+                    cfg = v.get_part_config()
+                    slotmap: dict = {}
+
+                    def walk(n):
+                        if isinstance(n, dict):
+                            sid = n.get("id")
+                            if sid:
+                                slotmap[sid] = n
+                            for c in (n.get("children") or {}).values():
+                                walk(c)
+
+                    walk(cfg.get("partsTree"))
+                    changed = False
+                    for sid, part in list(remaining.items()):
+                        node = slotmap.get(sid)
+                        if node is None:
+                            continue                        # slot not present yet
+                        suit = node.get("suitablePartNames") or []
+                        if part == "" or part in suit:
+                            if node.get("chosenPartName") != part:
+                                node["chosenPartName"] = part
+                                changed = True
+                            applied[sid] = part
+                        else:
+                            invalid[sid] = {"requested": part,
+                                            "valid_options": suit[:25]}
+                        del remaining[sid]
+                    if not changed:
+                        break                               # no progress this pass
+                    v.set_part_config(cfg)                  # respawn with new parts
+                    passes += 1
+                    try:
+                        self.bng.vehicles.switch(vid)       # keep player control
+                    except Exception:  # noqa: BLE001
+                        pass
+                    try:
+                        v.poll_sensors()
+                    except Exception:  # noqa: BLE001
+                        pass
+            except Exception as exc:  # noqa: BLE001
+                return _err(exc)
+        return {"ok": True, "vid": vid, "applied": applied, "invalid": invalid,
+                "not_found": dict(remaining), "respawns": passes,
+                "note": "swapped + validated against suitablePartNames. Tuning vars "
+                        "may have reset to defaults — re-apply with set_tuning."}
+
+    def save_config(self, name: str, vid=None) -> dict:
+        """Persist the car's CURRENT parts + tuning vars as a .pc build (confined
+        to USER_VEHICLES) so it survives a restart and loads from the config menu."""
+        guard = self._require_conn()
+        if guard:
+            return guard
+        try:
+            return self._save_pc(name, vid=vid)
+        except Exception as exc:  # noqa: BLE001
+            return _err(exc)
+
+
 # Module-level singleton.
 session = Session()

@@ -581,5 +581,50 @@ def set_traction_control(on: bool) -> dict:
         return {"ok": False, "error": repr(exc)}
 
 
+# ===========================================================================
+# FITMENT-AWARE PART EDITING — read what fits (suitablePartNames), swap safely.
+# ===========================================================================
+
+# --- 37. list_parts ----------------------------------------------------------
+@mcp.tool()
+def list_parts(filter: str | None = None) -> dict:
+    """List the car's part slots from the live part TREE. Each slot shows its
+    current part; with a `filter` (e.g. "suspension", "wheel", "diff", "transfer",
+    "rally") it also lists that slot's VALID options (`suitablePartNames` — the
+    same fitment data the in-game parts menu uses). Use this to see exactly what
+    fits before swapping — no guessing."""
+    try:
+        return session.list_parts(filter=filter)
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": repr(exc)}
+
+
+# --- 38. swap_parts ----------------------------------------------------------
+@mcp.tool()
+def swap_parts(changes: dict) -> dict:
+    """Fitment-safe part swap. `changes` = {"slot_id": "part_name"} (use "" to
+    empty a slot, e.g. strip a part). Each choice is validated against that slot's
+    `suitablePartNames`, applied via set_part_config, and the respawn CASCADE is
+    iterated (a new parent part exposes new child slots) until it settles — so
+    e.g. a wide→standard suspension + struts + wheels swap just works. Returns
+    applied / invalid / not_found. Re-apply tuning with set_tuning afterwards."""
+    try:
+        return session.swap_parts(changes)
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": repr(exc)}
+
+
+# --- 39. save_config ---------------------------------------------------------
+@mcp.tool()
+def save_config(name: str) -> dict:
+    """Save the car's CURRENT parts + tuning vars as a .pc build (confined to the
+    user vehicles folder) so it persists across restarts and loads from the
+    in-game config menu. The 'lock in this build' step."""
+    try:
+        return session.save_config(name)
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": repr(exc)}
+
+
 if __name__ == "__main__":
     mcp.run()  # stdio transport (default)
