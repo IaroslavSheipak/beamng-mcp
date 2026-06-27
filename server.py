@@ -519,5 +519,67 @@ def stop_time_trial() -> dict:
         return {"ok": False, "error": repr(exc)}
 
 
+# ===========================================================================
+# AUTO-LAP SESSION — drive freely, every flying lap self-times. Claude = brain.
+# ===========================================================================
+
+# --- 32. start_lap_session ---------------------------------------------------
+@mcp.tool()
+def start_lap_session(hz: float = 30.0) -> dict:
+    """Begin a HANDS-OFF lap session: set a start/finish line, then just DRIVE.
+    Every time you cross the line, a lap auto-times and its telemetry is saved —
+    no countdown, no 'done'. The lap time flashes in-world. Poll lap_session_status
+    for the list of times, or last_lap to analyze the most recent. This is the
+    'you just drive, I'm the brain' mode."""
+    try:
+        return session.start_lap_session(hz=hz)
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": repr(exc)}
+
+
+# --- 33. lap_session_status --------------------------------------------------
+@mcp.tool()
+def lap_session_status() -> dict:
+    """List the auto-timed laps this session (number + time), the best, and the
+    current lap's elapsed time."""
+    try:
+        return session.lap_session_status()
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": repr(exc)}
+
+
+# --- 34. last_lap ------------------------------------------------------------
+@mcp.tool()
+def last_lap() -> dict:
+    """The most recent auto-timed lap: lap time + the full telemetry report
+    (grip, balance, braking, ride, symptoms) for analysis/tuning."""
+    try:
+        return session.last_lap()
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": repr(exc)}
+
+
+# --- 35. stop_lap_session ----------------------------------------------------
+@mcp.tool()
+def stop_lap_session() -> dict:
+    """End the auto-lap session and return the final list of lap times."""
+    try:
+        return session.stop_lap_session()
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": repr(exc)}
+
+
+# --- 36. set_traction_control ------------------------------------------------
+@mcp.tool()
+def set_traction_control(on: bool) -> dict:
+    """Toggle traction control LIVE (no respawn) via the drivingDynamics CMU —
+    for an on/off A/B. On a loose surface TC can cut wasteful wheelspin (or bog
+    you); run an auto-lap session each way and compare."""
+    try:
+        return session.set_traction_control(on)
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": repr(exc)}
+
+
 if __name__ == "__main__":
     mcp.run()  # stdio transport (default)

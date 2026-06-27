@@ -115,6 +115,11 @@ class Session:
         self._tt_thread: threading.Thread | None = None
         self._tt_stop = threading.Event()
         self._tt_text_id: int | None = None    # live 3D countdown/timer text id
+        # Auto-lap session: drive freely, every flying lap auto-times + records.
+        self._sess: dict = {"state": "idle"}
+        self._sess_thread: threading.Thread | None = None
+        self._sess_stop = threading.Event()
+        self._laps: list = []
 
     # ---- helpers -----------------------------------------------------------
     def is_connected(self) -> bool:
@@ -916,6 +921,139 @@ class Session:
         if tt.get("error"):
             out["error"] = tt["error"]
         return out
+
+    # ---- auto-lap session (drive freely; every flying lap self-times) -----
+    def start_lap_session(self, hz: float = 30.0) -> dict:
+        """Begin a hands-off lap session: just DRIVE. Every time you cross the
+        start/finish line a lap is auto-timed and its telemetry saved — no
+        countdown, no 'done'. Poll lap_session_status / last_lap to read them."""
+        guard = self._require_conn()
+        if guard:
+            return guard
+        if self._sess.get("state") == "running":
+            return {"ok": False, "error": "lap session already running"}
+        if not self._sl:
+            sres = self.set_start_line()
+            if not sres.get("ok"):
+                return sres
+        try:
+            with self._lock:
+                self._lap_vid = self._use_current(None)
+        except Exception as exc:  # noqa: BLE001
+            return _err(exc)
+        self._laps = []
+        self._sess = {"state": "running", "lap": 0, "t_cross": None, "best": None}
+        self._sess_stop.clear()
+        self._sess_thread = threading.Thread(
+            target=self._sess_run, args=(float(hz),), daemon=True)
+        self._sess_thread.start()
+        return {"ok": True, "state": "running",
+                "note": "auto-lap ON — just drive. Cross the line to bank each lap; "
+                        "it self-times + records. Poll lap_session_status / last_lap."}
+
+    def _sess_run(self, hz: float) -> None:
+        """Background worker: record continuously, split a lap on each line cross."""
+        try:
+            vid = self._lap_vid
+            sl = self._sl["pos"]
+            self._lap.start(self._poll_rich, hz=hz)
+            armed = False
+            while not self._sess_stop.is_set():
+                time.sleep(0.12)
+                with self._lock:
+                    v = self.vehicles.get(vid)
+                    pos = dict(v.state).get("pos") if v is not None else None
+                if not pos:
+                    continue
+                d = math.sqrt(sum((pos[i] - sl[i]) ** 2 for i in range(3)))
+                if not armed and d > 40.0:
+                    armed = True
+                if armed and d < 10.0:                 # crossed the line
+                    now = time.time()
+                    stop = self._lap.stop()            # finalize this segment's CSV
+                    t_cross = self._sess.get("t_cross")
+                    if t_cross is not None:            # a full lap just completed
+                        lt = round(now - t_cross, 3)
+                        self._sess["lap"] += 1
+                        num = self._sess["lap"]
+                        self._laps.append({"num": num, "time": lt,
+                                           "csv": stop.get("path")})
+                        best = self._sess.get("best")
+                        is_best = best is None or lt < best
+                        if is_best:
+                            self._sess["best"] = lt
+                        self._tt_draw(
+                            "LAP %d  %s%s" % (num, self._fmt_time(lt),
+                                              "  *BEST*" if is_best else ""),
+                            sl, (0.2, 1.0, 0.4, 1.0) if is_best else (1.0, 1.0, 0.2, 1.0))
+                    self._sess["t_cross"] = now
+                    self._lap.start(self._poll_rich, hz=hz)   # begin next lap
+                    armed = False
+            self._lap.stop()
+            self._sess["state"] = "stopped"
+        except Exception as exc:  # noqa: BLE001
+            self._sess = {"state": "error", "error": repr(exc)}
+            try:
+                self._lap.stop()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def lap_session_status(self) -> dict:
+        """List the auto-timed laps so far (number, time), best, and current elapsed."""
+        s = dict(self._sess)
+        out: dict = {"ok": True, "state": s.get("state", "idle"),
+                     "count": len(self._laps),
+                     "laps": [{"num": l["num"], "time": self._fmt_time(l["time"]),
+                               "time_s": l["time"]} for l in self._laps]}
+        if s.get("best") is not None:
+            out["best"] = self._fmt_time(s["best"])
+        if s.get("state") == "running" and s.get("t_cross"):
+            out["current_lap_elapsed"] = self._fmt_time(time.time() - s["t_cross"])
+        return out
+
+    def last_lap(self) -> dict:
+        """The most recent auto-timed lap: time + full telemetry analysis."""
+        if not self._laps:
+            return {"ok": False,
+                    "error": "no completed laps yet — cross the start/finish line once to begin timing"}
+        l = self._laps[-1]
+        rep = lap_analysis.analyze_lap(lap_telemetry.read_lap_csv(l["csv"]))
+        return {"ok": True, "num": l["num"], "lap_time": self._fmt_time(l["time"]),
+                "lap_time_s": l["time"], "csv": l["csv"], "report": rep}
+
+    def stop_lap_session(self) -> dict:
+        """End the auto-lap session."""
+        if self._sess.get("state") == "running":
+            self._sess_stop.set()
+            if self._sess_thread is not None:
+                self._sess_thread.join(timeout=4.0)
+        return self.lap_session_status()
+
+    def set_traction_control(self, on: bool, vid=None) -> dict:
+        """Toggle traction control LIVE (no respawn) via the drivingDynamics CMU
+        tractionControl supervisor — for an on/off A/B on a loose surface."""
+        guard = self._require_conn()
+        if guard:
+            return guard
+        en = "true" if on else "false"
+        lua = (
+            "local n=0 for _,cmu in ipairs(controller.getControllersByType("
+            "'drivingDynamics/CMU')) do local tc=cmu.getSupervisor and "
+            "cmu.getSupervisor('tractionControl') if tc and tc.setParameters then "
+            "tc.setParameters({isEnabled=%s}) n=n+1 end end "
+            "return jsonEncode({ok=true,toggled=n,enabled=%s})" % (en, en)
+        )
+        res = self.vehicle_lua(lua, vid=vid)
+        if not res.get("ok"):
+            return res
+        raw = res.get("result")
+        try:
+            data = json.loads(raw) if isinstance(raw, str) else raw
+        except Exception:  # noqa: BLE001
+            data = {"raw": raw}
+        return {"ok": True, "traction_control": bool(on), "result": data,
+                "note": "TC %s (live). Run a session each way to compare wheelspin."
+                        % ("ENABLED" if on else "DISABLED")}
 
     # ---- race engineer: tuning surface + apply ----------------------------
     def get_tuning_full(self, vid=None) -> dict:
