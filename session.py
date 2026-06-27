@@ -114,6 +114,7 @@ class Session:
         self._tt: dict = {"state": "idle"}     # time-trial run state
         self._tt_thread: threading.Thread | None = None
         self._tt_stop = threading.Event()
+        self._tt_text_id: int | None = None    # live 3D countdown/timer text id
 
     # ---- helpers -----------------------------------------------------------
     def is_connected(self) -> bool:
@@ -686,12 +687,32 @@ class Session:
         m = int(s // 60)
         return "%d:%06.3f" % (m, s - m * 60)
 
-    def _ge_msg(self, text: str) -> None:
-        """Show an in-game on-screen message. Best-effort; never raises.
-        Caller must NOT hold self._lock (this acquires it)."""
+    def _tt_draw(self, text: str, pos, color=(1.0, 1.0, 0.2, 1.0)) -> None:
+        """Draw/replace the time-trial label as 3D WORLD TEXT via the debug drawer
+        (renders without the UI message app, which this build doesn't load — same
+        path as the start/finish gate). Best-effort; never raises. Caller holds NO
+        lock (this acquires it)."""
         try:
             with self._lock:
-                self.bng.ui.display_message(text)
+                if self._tt_text_id is not None:
+                    try:
+                        self.bng.debug.remove_text(self._tt_text_id)
+                    except Exception:  # noqa: BLE001
+                        pass
+                    self._tt_text_id = None
+                self._tt_text_id = self.bng.debug.add_text(
+                    [float(pos[0]), float(pos[1]), float(pos[2])], str(text),
+                    color, cling=True, offset=2.0)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _tt_clear_text(self) -> None:
+        """Remove the live time-trial text. Best-effort."""
+        try:
+            with self._lock:
+                if self._tt_text_id is not None:
+                    self.bng.debug.remove_text(self._tt_text_id)
+                    self._tt_text_id = None
         except Exception:  # noqa: BLE001
             pass
 
@@ -747,13 +768,18 @@ class Session:
                             self.bng.debug.remove_polyline(lid)
                         except Exception:  # noqa: BLE001
                             pass
+                    for tid in self._sl["ids"].get("text", []):
+                        try:
+                            self.bng.debug.remove_text(tid)
+                        except Exception:  # noqa: BLE001
+                            pass
                 nx, ny = -d[1], d[0]                # perpendicular in ground plane
                 n = math.hypot(nx, ny) or 1.0
                 nx, ny = nx / n, ny / n
                 half = 6.0
                 a = [pos[0] + nx * half, pos[1] + ny * half, pos[2]]
                 b = [pos[0] - nx * half, pos[1] - ny * half, pos[2]]
-                ids = {"spheres": [], "lines": []}
+                ids = {"spheres": [], "lines": [], "text": []}
                 green = (0.1, 1.0, 0.2, 1.0)
                 try:
                     ids["lines"].append(
@@ -765,12 +791,16 @@ class Session:
                         [a, b], [0.6, 0.6], [green, green], cling=True, offset=0.6))
                 except Exception:  # noqa: BLE001
                     pass
+                try:
+                    ids["text"].append(self.bng.debug.add_text(
+                        list(pos), "START / FINISH", green, cling=True, offset=1.5))
+                except Exception:  # noqa: BLE001
+                    pass
                 self._sl = {"pos": list(pos), "dir": list(d), "ids": ids}
             except Exception as exc:  # noqa: BLE001
                 return _err(exc)
-        self._ge_msg("Start/finish line set - drive a lap")
         return {"ok": True, "pos": self._sl["pos"],
-                "note": "green gate drawn at your position"}
+                "note": "green gate + START/FINISH label drawn (3D world text)"}
 
     def start_time_trial(self, countdown: int = 3, hz: float = 30.0) -> dict:
         """Countdown (3-2-1-GO on screen) -> records a rich lap -> auto-detects
@@ -801,21 +831,26 @@ class Session:
             with self._lock:
                 vid = self._use_current(None)     # connect (cache the handle)
             sl = self._sl["pos"]
+            # countdown — amber numbers, then green GO! (3D world text at the line)
             for i in range(max(0, countdown), 0, -1):
                 if self._tt_stop.is_set():
+                    self._tt_clear_text()
                     self._tt = {"state": "cancelled"}
                     return
-                self._ge_msg(str(i))
+                self._tt_draw(str(i), sl, (1.0, 0.7, 0.05, 1.0))
                 time.sleep(1.0)
-            self._ge_msg("GO!")
+            self._tt_draw("GO!", sl, (0.1, 1.0, 0.2, 1.0))
             go = time.time()
             self._lap_vid = vid
             self._lap.start(self._poll_rich, hz=hz)
             self._tt = {"state": "running", "go_time": go}
             armed = False
+            last_draw = 0.0
             while not self._tt_stop.is_set():
-                time.sleep(0.15)
-                if time.time() - go > 900:       # safety cap
+                time.sleep(0.12)
+                now = time.time()
+                el = now - go
+                if el > 900:                     # safety cap
                     break
                 with self._lock:
                     v = self.vehicles.get(vid)
@@ -823,6 +858,10 @@ class Session:
                     pos = dict(v.state).get("pos") if v is not None else None
                 if not pos:
                     continue
+                # live lap timer floating above the car (~3 Hz)
+                if now - last_draw > 0.33:
+                    self._tt_draw(self._fmt_time(el), pos, (1.0, 1.0, 0.2, 1.0))
+                    last_draw = now
                 dist = math.sqrt(sum((pos[i] - sl[i]) ** 2 for i in range(3)))
                 if not armed and dist > 40.0:    # left the line area
                     armed = True
@@ -833,7 +872,8 @@ class Session:
             self._tt = {"state": "done", "lap_time": round(lap_time, 3),
                         "armed": armed, "csv": stop.get("path"),
                         "report": stop.get("report")}
-            self._ge_msg("LAP  %s" % self._fmt_time(lap_time))
+            # final lap time stays up at the line (green)
+            self._tt_draw("LAP  %s" % self._fmt_time(lap_time), sl, (0.2, 1.0, 0.4, 1.0))
         except Exception as exc:  # noqa: BLE001
             self._tt = {"state": "error", "error": repr(exc)}
             try:
