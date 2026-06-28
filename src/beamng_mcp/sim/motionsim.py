@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import socket
 import struct
+import threading
+import time
 
 SIGNATURE = b"BNG1"
 # format(4s) + 21 floats: pos(3) vel(3) acc(3) up(3) anglePos(3) angleVel(3) angleAcc(3)
@@ -71,3 +73,69 @@ def listen_once(ip: str = "127.0.0.1", port: int = 4445, timeout: float = 2.0) -
         return parse(data)
     finally:
         sock.close()
+
+
+class MotionSimListener:
+    """Background UDP listener that keeps the LATEST MotionSim packet, so the 30 Hz
+    lap recorder can read it without blocking. No-op-safe if MotionSim isn't enabled
+    in-game (just times out and ``latest()`` returns None)."""
+
+    def __init__(self, ip: str = "127.0.0.1", port: int = 4445) -> None:
+        self.ip = ip
+        self.port = port
+        self._thread: threading.Thread | None = None
+        self._stop = threading.Event()
+        self._lock = threading.Lock()
+        self._latest: dict | None = None
+        self._latest_t: float | None = None  # monotonic
+        self.error: str | None = None
+
+    @property
+    def running(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
+    def start(self) -> None:
+        if self.running:
+            return
+        self._stop.clear()
+        self.error = None
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=2.0)
+        self._thread = None
+
+    def latest(self, max_age_s: float = 0.5) -> dict | None:
+        """The most recent packet if fresher than ``max_age_s``, else None."""
+        with self._lock:
+            if self._latest is None or self._latest_t is None:
+                return None
+            if time.monotonic() - self._latest_t > max_age_s:
+                return None
+            return self._latest
+
+    def _run(self) -> None:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind((self.ip, self.port))
+            sock.settimeout(0.5)
+            while not self._stop.is_set():
+                try:
+                    data, _addr = sock.recvfrom(256)
+                    pkt = parse(data)
+                except socket.timeout:
+                    continue
+                except Exception as exc:  # noqa: BLE001 — bad packet; keep listening
+                    self.error = repr(exc)
+                    continue
+                with self._lock:
+                    self._latest = pkt
+                    self._latest_t = time.monotonic()
+        except Exception as exc:  # noqa: BLE001 — bind failure etc.
+            self.error = repr(exc)
+        finally:
+            sock.close()
