@@ -53,6 +53,27 @@ def traction_control_lua(on: bool) -> str:
     )
 
 
+def tire_pressure_lua(psi_f: float | None, psi_r: float | None) -> str:
+    """Lua to set front/rear tire pressure LIVE (no respawn) via setGroupPressure.
+
+    Absolute Pa = gauge_psi * 6894.757 + 101325. Front/rear are bucketed by the
+    wheel name's first letter (F/R). Returns ``{ok, set=[[name, psi], ...]}``.
+    """
+    pf = "nil" if psi_f is None else repr(float(psi_f))
+    pr = "nil" if psi_r is None else repr(float(psi_r))
+    return (
+        "local pf,pr=%s,%s local done={} "
+        "if wheels and wheels.wheels then "
+        "for i=0,tableSizeC(wheels.wheels)-1 do local wh=wheels.wheels[i] "
+        "if wh and wh.name then local n=string.upper(wh.name) "
+        "local p=nil if string.sub(n,1,1)=='F' and pf then p=pf "
+        "elseif string.sub(n,1,1)=='R' and pr then p=pr end "
+        "if p and wh.pressureGroup then obj:setGroupPressure(wh.pressureGroup,p*6894.757+101325) "
+        "done[#done+1]={wh.name,p} end end end end "
+        "return jsonEncode({ok=true,set=done})" % (pf, pr)
+    )
+
+
 def lua_json(result: object) -> dict:
     """Parse a ``queue_lua_command(response=True)`` result that returns
     ``jsonEncode(...)``. Raises :class:`LuaError` if the chunk returned nothing,
