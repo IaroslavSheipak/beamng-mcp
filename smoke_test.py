@@ -99,11 +99,14 @@ def main() -> int:
     import server
     tools = server.mcp._tool_manager.list_tools()
     names = {t.name for t in tools}
-    check("server registers >=18 tools", len(tools) >= 18, f"got {len(tools)}")
+    check("server registers >=40 tools", len(tools) >= 40, f"got {len(tools)}")
     check("expected tools present",
           {"connect", "current_vehicles", "telemetry", "get_config",
            "set_config", "start_logging", "stop_logging", "summarize_drive",
-           "vehicle_lua"} <= names,
+           "vehicle_lua",
+           # timing + parts subsystems (kept in sync with the README tool table)
+           "start_time_trial", "start_lap_session", "set_traction_control",
+           "list_parts", "swap_parts", "car_mass", "clear_gates"} <= names,
           str(sorted(names)))
 
     # 8. logger.summarize_csv on a synthetic drive --------------------------

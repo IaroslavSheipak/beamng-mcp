@@ -95,6 +95,10 @@ def _parts_summary(tree) -> dict:
 class Session:
     """Holds connection + scenario + vehicle/sensor registries."""
 
+    GATE_HALF = 6.0          # start/finish gate half-width (m); shared by the
+                             # drawn gate AND the line-crossing detector so they
+                             # can never disagree.
+
     def __init__(self) -> None:
         self.bng: BeamNGpy | None = None
         self.scenario: Scenario | None = None
@@ -134,6 +138,59 @@ class Session:
         if vid not in self.vehicles:
             return {"ok": False, "error": f"no such vehicle {vid}; spawn first"}
         return None
+
+    def _evict(self, vid) -> None:
+        """Drop a per-vehicle handle + its sensors so the NEXT _use_current re-runs
+        the priming handshake. Call this after a poll/Lua/connect failure: the
+        cached Vehicle is dead or socket-wedged and would otherwise be handed back
+        forever, permanently breaking telemetry + every per-vehicle tuning tool."""
+        if vid:
+            self.vehicles.pop(vid, None)
+            self.sensors.pop(vid, None)
+
+    def _timing_busy(self) -> str | None:
+        """Which timing subsystem (if any) currently owns the single lap recorder.
+        Manual lap / time-trial / lap-session all drive ONE RichLapRecorder and one
+        3D-text id; running two at once stops/piggybacks each other's recorder and
+        fights over the same world-text → mixed/lost lap CSVs. This makes them
+        mutually exclusive."""
+        if self._tt.get("state") in ("counting", "running"):
+            return "time_trial"
+        if self._sess.get("state") == "running":
+            return "lap_session"
+        if self._lap.running:
+            return "lap"
+        return None
+
+    def _line_cross(self, prev, cur):
+        """True start/finish-plane crossing between two timestamped samples, with
+        the crossing instant linearly INTERPOLATED to the plane (sub-poll accuracy).
+
+        prev/cur are (t, [x,y,z]) tuples; self._sl holds {"pos","dir"}. The plane
+        normal is the car's forward heading when the line was set; a lap closes when
+        the segment goes from BEHIND the plane (-) to AHEAD (+) within the gate
+        half-width. Replaces the old 10 m proximity sphere, which false-triggered on
+        adjacent straights/hairpins/pit lane and quantized the time to the poll."""
+        if prev is None or cur is None or not self._sl:
+            return None
+        p0 = self._sl["pos"]
+        d = self._sl.get("dir") or [1.0, 0.0, 0.0]
+        fx, fy = d[0], d[1]
+        fn = math.hypot(fx, fy) or 1.0
+        fx, fy = fx / fn, fy / fn               # forward = plane normal (ground)
+        (tp, pp), (tc, pc) = prev, cur
+        sp = (pp[0] - p0[0]) * fx + (pp[1] - p0[1]) * fy
+        sc = (pc[0] - p0[0]) * fx + (pc[1] - p0[1]) * fy
+        if sp >= 0 or sc < 0 or sc == sp:       # must go from behind (-) to ahead (+)
+            return None
+        frac = -sp / (sc - sp)                  # interpolate to s == 0
+        cx = pp[0] + frac * (pc[0] - pp[0])
+        cy = pp[1] + frac * (pc[1] - pp[1])
+        nx, ny = -fy, fx                        # along the gate line
+        lat = (cx - p0[0]) * nx + (cy - p0[1]) * ny
+        if abs(lat) > self.GATE_HALF:           # crossed wide of the gate — ignore
+            return None
+        return tp + frac * (tc - tp)
 
     def _attach_classic_sensors(self, v: Vehicle) -> dict:
         """Attach the classic CPU sensors. State() is attached by Vehicle by
@@ -180,7 +237,13 @@ class Session:
             if not vid:
                 raise RuntimeError("no active player vehicle in the running game")
         if vid in self.vehicles:
-            return vid
+            v = self.vehicles[vid]
+            try:
+                if v.is_connected():            # cheap local check (connection.skt)
+                    return vid
+            except Exception:  # noqa: BLE001
+                pass
+            self._evict(vid)                    # stale handle — re-prime below
         last_exc = None
         for _ in range(5):
             current = self.bng.vehicles.get_current(include_config=False)
@@ -260,6 +323,24 @@ class Session:
                 return _err(exc)
 
     def disconnect(self) -> dict:
+        # Stop the background timing workers FIRST, OUTSIDE the lock. _tt_run /
+        # _sess_run take self._lock every loop iteration, so joining them while
+        # holding it would deadlock; instead we set their stop events (which they
+        # check at the top of the loop, before re-locking) and join unlocked.
+        # Without this, disconnect leaked a forever-spinning _sess_run and left
+        # _sess["state"]=="running", wedging every future start_lap_session.
+        self._tt_stop.set()
+        self._sess_stop.set()
+        try:
+            self._lap.stop()
+        except Exception:  # noqa: BLE001
+            pass
+        for t in (self._tt_thread, self._sess_thread):
+            if t is not None and t.is_alive():
+                t.join(timeout=4.0)
+        self._tt_thread = self._sess_thread = None
+        self._tt = {"state": "idle"}
+        self._sess = {"state": "idle"}
         with self._lock:
             if self.bng is None:
                 return {"ok": True, "connected": False}
@@ -367,11 +448,17 @@ class Session:
                 }
             except Exception as exc:  # noqa: BLE001
                 rich_err = repr(exc)
+                # Evict the stale/wedged handle so the NEXT call re-primes via the
+                # full handshake instead of returning this dead handle forever.
+                self._evict(vid if isinstance(vid, str) else target)
             # 2) fallback — GE state + OutGauge (immune to the per-vehicle socket)
             fb = {"ok": True, "vid": target, "source": "fallback",
                   "note": "per-vehicle telemetry socket unavailable (often right "
                           "after a config-change respawn); returned GE state + "
-                          "OutGauge. Recover/reload the car to restore Electrics.",
+                          "OutGauge. The handle was evicted, so the next telemetry "
+                          "call re-primes automatically; if it persists the socket "
+                          "dropped — call reconnect() (reloading the car keeps the "
+                          "same dead handle and won't help).",
                   "rich_error": rich_err}
             try:
                 states = self.bng.vehicles.get_states([target]) if target else {}
@@ -426,6 +513,7 @@ class Session:
                 resp = self.vehicles[vid].queue_lua_command(code, response=True)
                 return {"ok": True, "vid": vid, "result": resp}
             except Exception as exc:  # noqa: BLE001
+                self._evict(vid)   # Lua failed — drop a wedged handle so it re-primes
                 return _err(exc)
 
     def get_tuning(self, vid=None) -> dict:
@@ -465,13 +553,25 @@ class Session:
                 vid = self._use_current(vid)
                 v = self.vehicles[vid]
                 v.set_part_config(cfg)
-                # set_part_config respawns (repairs damage); re-sync sensors.
-                v.poll_sensors()
+                # set_part_config respawns: it can drop the player-vehicle pointer
+                # (dead controls) and briefly drop the per-vehicle socket. Mirror
+                # set_tuning_vars/swap_parts — re-assert the player car and re-prime
+                # sensors, BOTH guarded so a transient hiccup never reports _err for
+                # a config that was actually applied.
+                try:
+                    self.bng.vehicles.switch(vid)
+                except Exception:  # noqa: BLE001
+                    pass
+                try:
+                    v.poll_sensors()
+                except Exception:  # noqa: BLE001 — socket re-priming after respawn
+                    pass
                 return {
                     "ok": True,
                     "vid": vid,
                     "respawned": True,
-                    "note": "respawn repairs damage; sensors re-polled",
+                    "note": "respawn repairs damage; player car re-asserted, "
+                            "sensors re-polled",
                 }
             except Exception as exc:  # noqa: BLE001
                 return _err(exc)
@@ -628,6 +728,11 @@ class Session:
         guard = self._require_conn()
         if guard:
             return guard
+        busy = self._timing_busy()
+        if busy:
+            return {"ok": False, "owner": busy,
+                    "error": f"timing busy ({busy}); stop it first "
+                             f"(stop_lap / stop_time_trial / stop_lap_session)"}
         try:                                   # prime the socket so poll 1 is fast
             with self._lock:
                 self._lap_vid = self._use_current(None)
@@ -637,6 +742,11 @@ class Session:
 
     def stop_lap(self) -> dict:
         """Stop the lap recording and auto-analyze it (grip / balance / ride)."""
+        owner = self._timing_busy()
+        if owner in ("time_trial", "lap_session"):
+            return {"ok": False, "owner": owner,
+                    "error": f"the recorder is owned by {owner}; "
+                             f"use stop_{owner} instead (stop_lap would corrupt it)"}
         res = self._lap.stop()
         if res.get("ok") and res.get("path"):
             try:
@@ -837,9 +947,10 @@ class Session:
         guard = self._require_conn()
         if guard:
             return guard
-        if self._tt.get("state") in ("counting", "running"):
-            return {"ok": False, "error": "a time trial is already running",
-                    "state": self._tt.get("state")}
+        busy = self._timing_busy()
+        if busy:
+            return {"ok": False, "owner": busy,
+                    "error": f"timing busy ({busy}); stop it before a time trial"}
         if not self._sl:
             sres = self.set_start_line()        # auto-anchor at current position
             if not sres.get("ok"):
@@ -874,11 +985,15 @@ class Session:
             self._tt = {"state": "running", "go_time": go}
             armed = False
             last_draw = 0.0
+            prev = None                          # (t, pos) for plane-crossing
+            cross_t = None                       # interpolated crossing time
+            timed_out = False
             while not self._tt_stop.is_set():
                 time.sleep(0.12)
                 now = time.time()
                 el = now - go
                 if el > 900:                     # safety cap
+                    timed_out = True
                     break
                 with self._lock:
                     v = self.vehicles.get(vid)
@@ -891,17 +1006,41 @@ class Session:
                     self._tt_draw(self._fmt_time(el), pos, (1.0, 1.0, 0.2, 1.0))
                     last_draw = now
                 dist = math.sqrt(sum((pos[i] - sl[i]) ** 2 for i in range(3)))
-                if not armed and dist > 40.0:    # left the line area
+                if not armed and dist > 40.0:    # left the start area: now armable
                     armed = True
-                if armed and dist < 10.0:        # came back across it
-                    break
-            lap_time = time.time() - go
+                cur = (now, pos)
+                if armed:
+                    ct = self._line_cross(prev, cur)
+                    if ct is not None:           # crossed the start/finish PLANE
+                        cross_t = ct
+                        break
+                prev = cur
             stop = self._lap.stop()
-            self._tt = {"state": "done", "lap_time": round(lap_time, 3),
-                        "armed": armed, "csv": stop.get("path"),
-                        "report": stop.get("report")}
-            # final lap time stays up at the line (green)
-            self._tt_draw("LAP  %s" % self._fmt_time(lap_time), sl, (0.2, 1.0, 0.4, 1.0))
+            if cross_t is not None:
+                lap_time = cross_t - go
+                self._tt = {"state": "done", "lap_time": round(lap_time, 3),
+                            "armed": armed, "auto": True, "csv": stop.get("path"),
+                            "report": stop.get("report")}
+                # final lap time stays up at the line (green)
+                self._tt_draw("LAP  %s" % self._fmt_time(lap_time), sl,
+                              (0.2, 1.0, 0.4, 1.0))
+            elif self._tt_stop.is_set() and not timed_out:
+                # manual finish (stop_time_trial): user stopped at the line — report
+                # elapsed as an UNofficial time, clearly flagged.
+                lap_time = time.time() - go
+                self._tt = {"state": "done", "lap_time": round(lap_time, 3),
+                            "armed": armed, "auto": False, "csv": stop.get("path"),
+                            "report": stop.get("report"),
+                            "note": "manual stop — time taken at stop, not an "
+                                    "auto-detected line crossing"}
+                self._tt_draw("LAP  %s" % self._fmt_time(lap_time), sl,
+                              (0.2, 1.0, 0.4, 1.0))
+            else:
+                # 900 s safety cap, no crossing — don't fabricate a lap time.
+                self._tt = {"state": "aborted", "armed": armed,
+                            "reason": "timed out (900 s) without crossing the line",
+                            "csv": stop.get("path"), "report": stop.get("report")}
+                self._tt_draw("NO LAP", sl, (1.0, 0.5, 0.1, 1.0))
         except Exception as exc:  # noqa: BLE001
             self._tt = {"state": "error", "error": repr(exc)}
             try:
@@ -953,8 +1092,10 @@ class Session:
         guard = self._require_conn()
         if guard:
             return guard
-        if self._sess.get("state") == "running":
-            return {"ok": False, "error": "lap session already running"}
+        busy = self._timing_busy()
+        if busy:
+            return {"ok": False, "owner": busy,
+                    "error": f"timing busy ({busy}); stop it before a lap session"}
         if not self._sl:
             sres = self.set_start_line()
             if not sres.get("ok"):
@@ -981,8 +1122,10 @@ class Session:
             sl = self._sl["pos"]
             self._lap.start(self._poll_rich, hz=hz)
             armed = False
+            prev = None                                # (t, pos) for plane-crossing
             while not self._sess_stop.is_set():
                 time.sleep(0.12)
+                now = time.time()
                 with self._lock:
                     v = self.vehicles.get(vid)
                     pos = dict(v.state).get("pos") if v is not None else None
@@ -991,12 +1134,14 @@ class Session:
                 d = math.sqrt(sum((pos[i] - sl[i]) ** 2 for i in range(3)))
                 if not armed and d > 40.0:
                     armed = True
-                if armed and d < 10.0:                 # crossed the line
-                    now = time.time()
+                cur = (now, pos)
+                ct = self._line_cross(prev, cur) if armed else None
+                prev = cur
+                if ct is not None:                     # crossed the start PLANE
                     stop = self._lap.stop()            # finalize this segment's CSV
                     t_cross = self._sess.get("t_cross")
                     if t_cross is not None:            # a full lap just completed
-                        lt = round(now - t_cross, 3)
+                        lt = round(ct - t_cross, 3)    # interpolated, sub-poll
                         self._sess["lap"] += 1
                         num = self._sess["lap"]
                         self._laps.append({"num": num, "time": lt,
@@ -1009,9 +1154,11 @@ class Session:
                             "LAP %d  %s%s" % (num, self._fmt_time(lt),
                                               "  *BEST*" if is_best else ""),
                             sl, (0.2, 1.0, 0.4, 1.0) if is_best else (1.0, 1.0, 0.2, 1.0))
-                    self._sess["t_cross"] = now
+                    self._sess["t_cross"] = ct          # next lap starts AT crossing
                     self._lap.start(self._poll_rich, hz=hz)   # begin next lap
                     armed = False
+                    prev = None                          # don't re-fire on the same
+                                                         # crossing next sample
             self._lap.stop()
             self._sess["state"] = "stopped"
         except Exception as exc:  # noqa: BLE001
@@ -1074,9 +1221,21 @@ class Session:
             data = json.loads(raw) if isinstance(raw, str) else raw
         except Exception:  # noqa: BLE001
             data = {"raw": raw}
-        return {"ok": True, "traction_control": bool(on), "result": data,
-                "note": "TC %s (live). Run a session each way to compare wheelspin."
-                        % ("ENABLED" if on else "DISABLED")}
+        toggled = data.get("toggled", 0) if isinstance(data, dict) else 0
+        if not toggled:
+            # Many cars have no drivingDynamics/CMU supervisor — nothing changed.
+            # Reporting success here turns the headline TC-on/TC-off A/B into two
+            # identical runs, so fail loudly instead.
+            return {"ok": False, "traction_control_changed": False,
+                    "requested": bool(on), "result": data,
+                    "error": "no drivingDynamics/CMU traction-control supervisor on "
+                             "this car — nothing was toggled, so a TC on/off A/B is "
+                             "meaningless here."}
+        return {"ok": True, "traction_control": bool(on), "toggled": toggled,
+                "result": data,
+                "note": "TC %s (live, %d supervisor%s). Run a session each way to "
+                        "compare wheelspin." % ("ENABLED" if on else "DISABLED",
+                                                toggled, "" if toggled == 1 else "s")}
 
     # ---- race engineer: tuning surface + apply ----------------------------
     def get_tuning_full(self, vid=None) -> dict:

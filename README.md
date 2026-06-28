@@ -149,6 +149,13 @@ C:\Users\Iaroslav\beamng-mcp\.venv\Scripts\python.exe smoke_test.py
 | `set_tuning` / `apply_setup` | attach | apply tuning `$vars` (clamped to live min/max; **respawns** like the Tuning menu's Apply); `apply_setup` takes a `race_engineer` plan and can persist a `.pc` |
 | `set_tire_pressure` | attach | set front/rear tire psi **LIVE** (no respawn) via the vehicle's pressure groups |
 | `wheel_telemetry` | analysis | per-wheel Lua probe: wheelSpeed, angularVelocity, brake surface temp (lockup / brake-bias / thermal inference) |
+| `reconnect` | attach | close + reopen the GE socket; recovers a stale session after a game restart (no manual disconnect/connect) |
+| `set_start_line` / `clear_gates` | race engineer | mark the car's position as the start/finish line (draws a 3D gate + label); `clear_gates` removes all gate visuals incl. orphans |
+| `start_time_trial` / `time_trial_status` / `stop_time_trial` | race engineer | 3-2-1-GO countdown → records a rich lap → auto-times on a true start/finish **line crossing** → shows the time in-game |
+| `start_lap_session` / `lap_session_status` / `last_lap` / `stop_lap_session` | race engineer | hands-off auto-lap: just drive — every flying lap self-times (line crossing) + records its own CSV |
+| `set_traction_control` | attach | toggle the drivingDynamics TC supervisor **LIVE** (no respawn) for an on/off A/B; errors if the car has no TC to change |
+| `list_parts` / `swap_parts` / `save_config` | attach | fitment-aware part editing: list slots + suitable parts, swap a part (respawns), persist to a `.pc` |
+| `car_mass` | attach | real vehicle mass (total, optionally without wheels) |
 
 Every tool returns a JSON object `{"ok": bool, ...}` and never raises across the
 MCP boundary. Tools that need the game return
@@ -181,6 +188,13 @@ wall (her name is Mara).
    `set_tire_pressure(24, 26)` is a **live** trim (no respawn).
 4. **Re-drive and confirm.** One change at a time; re-record; compare the balance
    index before/after.
+
+> **Lap-timing modes (use one at a time — they share one recorder).** Step 1 has
+> three flavors: `start_lap`/`stop_lap` (manual single lap); `start_time_trial`
+> (3-2-1-GO countdown → one auto-timed lap); and `start_lap_session` (hands-off —
+> just keep driving, every flying lap self-times). All close a lap on a true
+> start/finish **line crossing**, interpolated between samples — not a proximity
+> radius — so adjacent straights, hairpins and pit lane don't false-trigger.
 
 What it tunes (resolved per-car at runtime, never hardcoded): springs, anti-roll
 bars, **bump & rebound damping**, ride height, camber, toe, caster, brake bias,

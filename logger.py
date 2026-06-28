@@ -1,9 +1,8 @@
 """logger.py — OutGauge UDP drive logger (background thread) + CSV summary.
 
-Shared by the MCP start_logging/stop_logging/summarize_drive tools and the
-standalone outgauge_logger.py / drive_summary.py CLIs. OutGauge does NOT use the
-per-vehicle tech socket, so it is immune to the post-respawn priming issue that
-affects the live Electrics telemetry path.
+Backs the MCP start_logging/stop_logging/summarize_drive tools. OutGauge does NOT
+use the per-vehicle tech socket, so it is immune to the post-respawn priming issue
+that affects the live Electrics telemetry path.
 
 Enable OutGauge in-game first: Options > Other > Protocols > OutGauge,
 IP 127.0.0.1, port 4444, blank ID.
