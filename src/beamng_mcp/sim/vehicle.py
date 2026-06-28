@@ -110,16 +110,21 @@ def use_current(sim: Simulator, vid: str | None = None, tries: int = 5) -> str:
 
 
 def current_vehicles(sim: Simulator) -> dict:
-    """List the vehicles present in the running game, flagging the player's car."""
-    info = sim.bng.vehicles.get_current_info(include_config=False)
-    try:
-        player = sim.bng.vehicles.get_player_vehicle_id().get("vid")
-    except Exception:
-        player = None
-    return {
-        "player_vid": player,
-        "vehicles": [
-            {"vid": vid, "model": d.get("model"), "is_player": vid == player}
-            for vid, d in info.items()
-        ],
-    }
+    """List the vehicles present in the running game, flagging the player's car.
+
+    Public op — acquires ``sim.lock`` (re-entrant, so calling it from another
+    locked op is safe).
+    """
+    with sim.lock:
+        info = sim.bng.vehicles.get_current_info(include_config=False)
+        try:
+            player = sim.bng.vehicles.get_player_vehicle_id().get("vid")
+        except Exception:
+            player = None
+        return {
+            "player_vid": player,
+            "vehicles": [
+                {"vid": vid, "model": d.get("model"), "is_player": vid == player}
+                for vid, d in info.items()
+            ],
+        }

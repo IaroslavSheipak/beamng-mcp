@@ -91,3 +91,13 @@ def run_lua_json(sim: Simulator, code: str, vid: str | None = None) -> dict:
     """``run_lua`` + ``lua_json`` — the common case. Returns ``{vid, data}``."""
     out = run_lua(sim, code, vid)
     return {"vid": out["vid"], "data": lua_json(out["result"])}
+
+
+def vehicle_lua(sim: Simulator, code: str, vid: str | None = None) -> dict:
+    """Public op: run a Lua chunk on the current vehicle, return ``{vid, result}``.
+
+    Acquires ``sim.lock``. ``run_lua`` is the lock-free helper used by the tuning
+    ops that already hold the lock.
+    """
+    with sim.lock:
+        return run_lua(sim, code, vid)
