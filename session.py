@@ -745,9 +745,45 @@ class Session:
         except Exception:  # noqa: BLE001
             return None
 
+    def _wipe_gate_visuals(self) -> None:
+        """Brute-remove debug-draw IDs 0..N for spheres/lines/text. The GE handler
+        (techCore.handleRemoveDebugObjects) does debugObjects[type][id]=nil per id
+        and tolerates missing ids, so this safely clears EVERY gate — including the
+        ones orphaned by stale post-reconnect IDs we can no longer track by hand."""
+        if not self.bng:
+            return
+        rng = list(range(0, 64))
+        try:
+            self.bng.debug.remove_spheres(rng)
+        except Exception:  # noqa: BLE001
+            pass
+        for i in rng:
+            try:
+                self.bng.debug.remove_polyline(i)
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                self.bng.debug.remove_text(i)
+            except Exception:  # noqa: BLE001
+                pass
+
+    def clear_gates(self) -> dict:
+        """Wipe ALL start/finish gates + the live timer text from the world — fixes
+        the pile-up of overlapping gates left by earlier reconnects. Also forgets
+        the logical start line; call set_start_line to drop a fresh single gate."""
+        guard = self._require_conn()
+        if guard:
+            return guard
+        with self._lock:
+            self._wipe_gate_visuals()
+            self._sl = None
+            self._tt_text_id = None
+        return {"ok": True, "note": "all start/finish gates + timer text cleared"}
+
     def set_start_line(self) -> dict:
         """Mark the car's CURRENT position as the start/finish line and draw a
-        green gate across the track. GE-side (no per-vehicle socket)."""
+        green gate across the track. GE-side (no per-vehicle socket). Clears any
+        existing gates first, so they never accumulate."""
         guard = self._require_conn()
         if guard:
             return guard
@@ -763,21 +799,8 @@ class Session:
                 d = st.get("dir") or [1.0, 0.0, 0.0]
                 if not pos:
                     return {"ok": False, "error": "could not read car position"}
-                if self._sl and isinstance(self._sl.get("ids"), dict):
-                    try:
-                        self.bng.debug.remove_spheres(self._sl["ids"].get("spheres", []))
-                    except Exception:  # noqa: BLE001
-                        pass
-                    for lid in self._sl["ids"].get("lines", []):
-                        try:
-                            self.bng.debug.remove_polyline(lid)
-                        except Exception:  # noqa: BLE001
-                            pass
-                    for tid in self._sl["ids"].get("text", []):
-                        try:
-                            self.bng.debug.remove_text(tid)
-                        except Exception:  # noqa: BLE001
-                            pass
+                self._wipe_gate_visuals()       # clear ALL gates (incl. orphans
+                                                # from past reconnects), not 1
                 nx, ny = -d[1], d[0]                # perpendicular in ground plane
                 n = math.hypot(nx, ny) or 1.0
                 nx, ny = nx / n, ny / n
@@ -1398,6 +1421,27 @@ class Session:
             return self._save_pc(name, vid=vid)
         except Exception as exc:  # noqa: BLE001
             return _err(exc)
+
+
+    def car_mass(self, without_wheels: bool = False, vid=None) -> dict:
+        """Read the car's ACTUAL mass (kg) + center of gravity from the physics
+        core via vehicle.get_mass_properties() — the documented way, no guessing.
+        Use it to MEASURE the weight delta from part swaps / stripping."""
+        guard = self._require_conn()
+        if guard:
+            return guard
+        with self._lock:
+            try:
+                vid = self._use_current(vid)
+                mp = self.vehicles[vid].get_mass_properties(without_wheels=without_wheels)
+            except Exception as exc:  # noqa: BLE001
+                return _err(exc)
+        mass = mp.get("mass") if isinstance(mp, dict) else None
+        com = mp.get("center_of_gravity") if isinstance(mp, dict) else None
+        return {"ok": True, "vid": vid,
+                "mass_kg": round(mass, 1) if isinstance(mass, (int, float)) else mass,
+                "center_of_gravity": com, "without_wheels": without_wheels,
+                "raw": mp}
 
 
 # Module-level singleton.

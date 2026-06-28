@@ -626,5 +626,30 @@ def save_config(name: str) -> dict:
         return {"ok": False, "error": repr(exc)}
 
 
+# --- 40. car_mass ------------------------------------------------------------
+@mcp.tool()
+def car_mass(without_wheels: bool = False) -> dict:
+    """Read the car's ACTUAL mass in kg + center of gravity (from the physics core
+    via get_mass_properties) — measure real weight, don't estimate. Call before/
+    after a part swap or strip to see the exact kg saved. `without_wheels` excludes
+    unsprung wheel mass."""
+    try:
+        return session.car_mass(without_wheels=without_wheels)
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": repr(exc)}
+
+
+# --- 41. clear_gates ---------------------------------------------------------
+@mcp.tool()
+def clear_gates() -> dict:
+    """Wipe ALL start/finish gates + the live timer text from the world. Fixes the
+    pile-up of overlapping gates left by earlier reconnects. set_start_line now
+    also auto-clears first, so gates no longer accumulate."""
+    try:
+        return session.clear_gates()
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": repr(exc)}
+
+
 if __name__ == "__main__":
     mcp.run()  # stdio transport (default)
