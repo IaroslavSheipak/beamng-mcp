@@ -26,6 +26,8 @@ class Settings:
     userpath_root: str
     host: str
     port: int
+    #: Where drive/lap CSVs are written (RichLapRecorder + DriveLogger share it).
+    logs_dir: str
 
     @property
     def user_vehicles(self) -> str:
@@ -48,7 +50,8 @@ class Settings:
         userpath_root = os.environ.get("BEAMNG_USERPATH", os.path.dirname(user_folder))
         host = os.environ.get("BEAMNG_HOST", DEFAULT_HOST)
         port = int(os.environ.get("BEAMNG_PORT", str(DEFAULT_PORT)))
-        return cls(game_home, user_folder, userpath_root, host, port)
+        logs_dir = os.environ.get("BEAMNG_LOGS_DIR", os.path.join(os.getcwd(), "logs"))
+        return cls(game_home, user_folder, userpath_root, host, port, logs_dir)
 
 
 #: Process-wide settings, resolved from the environment at import time.

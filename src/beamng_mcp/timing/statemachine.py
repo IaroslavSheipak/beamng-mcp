@@ -19,12 +19,20 @@ import math
 import threading
 import time
 from collections.abc import Callable
+from typing import Protocol
 
 from ..errors import BeamNGError
 from ..sim.context import Simulator
 from ..sim.vehicle import use_current
 from .line import GATE_HALF, StartLine, gate_endpoints, line_cross
 from .recorder import RichLapRecorder
+
+
+class MotionSource(Protocol):
+    """Duck-typed MotionSim listener -- keeps ``timing`` decoupled from ``sim``
+    (the same reason ``analyze`` is injected rather than imported)."""
+
+    def latest(self) -> dict | None: ...
 
 # GForces -> analysis convention (gx=longitudinal, gy=lateral, gz vertical ~+1g),
 # in g-units. Ported from v1. (Phase 2: MotionSim supersedes this — gravity-
@@ -53,15 +61,39 @@ def _num(x: object) -> object:
         return x
 
 
+def _motion_fields(motion: MotionSource | None) -> dict:
+    """``{ms_yaw_rate, ms_ax, ms_ay, ms_az}`` from the latest MotionSim packet.
+
+    ``{}`` if there is no listener or no fresh packet (no-op-safe: the recorder
+    just leaves those CSV columns blank, e.g. when MotionSim isn't enabled
+    in-game). Duck-typed on ``.latest()`` so this is testable without a real
+    :class:`~beamng_mcp.sim.motionsim.MotionSimListener`.
+    """
+    if motion is None:
+        return {}
+    pkt = motion.latest()
+    if pkt is None:
+        return {}
+    ax, ay, az = pkt["acc"]
+    return {"ms_yaw_rate": pkt["ang_vel"][2], "ms_ax": ax, "ms_ay": ay, "ms_az": az}
+
+
 class LapTimer:
     """One recorder, one gate, one worker — three mutually exclusive modes."""
 
     def __init__(
-        self, sim: Simulator, logs_dir: str, analyze: Callable[[str], dict] | None = None
+        self,
+        sim: Simulator,
+        logs_dir: str,
+        analyze: Callable[[str], dict] | None = None,
+        motion: MotionSource | None = None,
     ) -> None:
         self.sim = sim
         self.recorder = RichLapRecorder(logs_dir)
         self._analyze = analyze
+        #: Optional MotionSimListener (duck-typed) -- adds true yaw rate +
+        #: gravity-excluded accel columns to the rich recorder when present.
+        self._motion = motion
         self.line: StartLine | None = None
         self._text_id: int | None = None
         self._lap_vid: str | None = None
@@ -114,7 +146,7 @@ class LapTimer:
                     return _num(e[k])
             return None
 
-        return {
+        row = {
             "speed": speed,
             "posx": pos[0], "posy": pos[1], "posz": pos[2],
             "heading": heading,
@@ -130,6 +162,8 @@ class LapTimer:
             "abs_active": ch("abs_active"), "tcs_active": ch("tcs_active"),
             "esc_active": ch("esc_active"),
         }
+        row.update(_motion_fields(self._motion))
+        return row
 
     def _read_pos(self, vid: str) -> list | None:
         """Cached player position (the recorder keeps v.state fresh)."""

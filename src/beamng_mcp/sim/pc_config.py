@@ -17,6 +17,16 @@ from ..config import SETTINGS
 _SAFE_NAME = re.compile(r"^[A-Za-z0-9 _\-.]+$")
 _FORBIDDEN = ("/", "\\", ":", "..")
 
+#: Known drivable stock models — fallback list for list_vehicle_models when a
+#: model's install zip isn't found by name (e.g. content not yet scanned).
+STOCK_MODELS = [
+    "autobello", "ball", "barstow", "bastion", "bluebuck", "bolide", "burnside",
+    "bx", "citybus", "covet", "etk800", "etki", "etkc", "fullsize", "hopper",
+    "lansdale", "legran", "midsize", "midtruck", "miramar", "moonhawk", "nine",
+    "pessima", "pickup", "roamer", "sbr", "scintilla", "semi", "sunburst",
+    "vivace", "wendover", "wigeon",
+]
+
 
 def _root(root: str | None) -> str:
     return root if root is not None else SETTINGS.user_vehicles
@@ -136,3 +146,25 @@ def write_pc(model: str, name: str, data: object, root: str | None = None) -> di
     with open(target, "w", encoding="utf-8") as fh:
         json.dump(data, fh, indent=2)
     return {"ok": True, "path": target, "warnings": warnings}
+
+
+def list_vehicle_models(install_dir: str | None = None, user_dir: str | None = None) -> dict:
+    """Drivable models: install ``content/vehicles`` zips + user vehicle dirs,
+    unioned with :data:`STOCK_MODELS`. Pure filesystem scan, no game needed."""
+    install = install_dir if install_dir is not None else SETTINGS.install_vehicles
+    user = user_dir if user_dir is not None else SETTINGS.user_vehicles
+    install_models: set[str] = set()
+    if os.path.isdir(install):
+        install_models = {f[:-4] for f in os.listdir(install) if f.endswith(".zip")}
+    user_models: set[str] = set()
+    if os.path.isdir(user):
+        user_models = {d for d in os.listdir(user) if os.path.isdir(os.path.join(user, d))}
+    all_models = install_models | user_models | set(STOCK_MODELS)
+    return {
+        "models": sorted(all_models),
+        "source_counts": {
+            "install": len(install_models),
+            "user": len(user_models),
+            "stock_fallback": len(STOCK_MODELS),
+        },
+    }

@@ -28,15 +28,20 @@ The expensive, invisible knowledge is preserved. Only the **structure** and the
 ```
 src/beamng_mcp/
   server.py            # FastMCP app: thin tool defs -> services
+  app.py               # wires Simulator + LapTimer + MotionSimListener + DriveLogger;
+                        # race_engineer()/apply_setup() orchestration
   config.py            # typed settings: paths, host/port, env overrides
   errors.py            # typed error envelope (the {ok:false,...} contract)
   sim/                 # THE PRECIOUS INTEGRATION LAYER — ported verbatim + tested
-    connection.py      # BeamNGpy lifecycle + the single lock
+    connection.py      # BeamNGpy lifecycle + the single lock (context.py)
     vehicle.py         # handle resolution, _use_current, eviction, classic sensors
     lua.py             # vehicle-VM Lua chunks + json contract
     telemetry.py       # rich poll + GE/OutGauge fallback
     tuning.py          # part config, $vars set/clamp, tire pressure, parts swap
     outgauge.py        # UDP parser (kept ~as-is)
+    motionsim.py       # BNG1 UDP parser + background listener (NEW capability)
+    scenario.py        # ACTIVE-mode spawn()/run_test() (v1 tool-surface parity)
+    drivelog.py        # plain OutGauge-only drive logger + summary (v1 logger.py port)
   timing/              # bounded context: ONE recorder owner by design
     recorder.py        # RichLapRecorder (kept)
     line.py            # start/finish geometry + _line_cross (the fixed one)
@@ -71,11 +76,18 @@ tests/
 
 ## Phases — each ends GREEN (tested + live-checked)
 
-0. **Scaffold** — `pyproject.toml`, `src/` package, ruff + pytest + mypy, move v1 to `legacy/` as the porting reference.
-1. **Port `sim/` + `timing/`** with contract tests → reach `connect → telemetry → tune → lap` parity live.
-2. **Redesign `analysis/`** against the recorded-lap fixtures (golden reports; validity + spike rejection prove out).
-3. **Tool layer** — typed schemas + docs; parity check vs the v1 tool surface.
-4. **Live re-validation** — drive laps; same checks as today's v1 live test.
+0. **Scaffold** ✅ — `pyproject.toml`, `src/` package, ruff + pytest + mypy, move v1 to `legacy/` as the porting reference.
+1. **Port `sim/` + `timing/`** ✅ with contract tests → reach `connect → telemetry → tune → lap` parity live.
+2. **Redesign `analysis/`** ✅ against the recorded-lap fixtures (golden reports; validity + spike rejection prove out).
+3. **Tool layer** ✅ — `app.py` wires one `Simulator` + one `LapTimer` (analysis injected) + one `MotionSimListener`
+   (started/stopped with the connection) + one `DriveLogger`. `server.py` is the FastMCP tool layer: 43 tools, full
+   v1 parity — including `spawn`/`run_test` (new `sim/scenario.py`) and the plain OutGauge drive logger (new
+   `sim/drivelog.py`), neither of which the original phase breakdown above called out as their own modules.
+   `timing/recorder.py`'s `RICH_FIELDS` now carries `ms_yaw_rate`/`ms_ax`/`ms_ay`/`ms_az` from the MotionSim
+   listener. 125 tests green (101 + 24 new); ruff/mypy clean on every file this phase touched (pre-existing
+   findings in Phase 0–2 code were left as-is — out of this phase's scope).
+4. **Live re-validation** ⬜ — drive laps through v2 against the running game; verify a real MotionSim `BNG1`
+   packet end to end (endianness/port are currently assumed).
 
 ## Definition of done (professional)
 

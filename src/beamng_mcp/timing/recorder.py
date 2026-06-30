@@ -22,6 +22,9 @@ RICH_FIELDS = [
     "rpm", "gear", "throttle", "brake", "brakeF", "brakeR",
     "steering", "steering_input", "clutch", "boost", "wheelspeed",
     "abs_active", "tcs_active", "esc_active",
+    # MotionSim (BNG1) channels, when the listener has a fresh packet: true yaw
+    # rate + gravity-excluded accel -- blank ("") if MotionSim isn't enabled.
+    "ms_yaw_rate", "ms_ax", "ms_ay", "ms_az",
 ]
 
 

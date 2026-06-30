@@ -2,7 +2,7 @@ import pytest
 
 from beamng_mcp.errors import BeamNGError
 from beamng_mcp.sim.context import Simulator
-from beamng_mcp.timing.statemachine import LapTimer, fmt_time
+from beamng_mcp.timing.statemachine import LapTimer, _motion_fields, fmt_time
 
 
 def _timer(tmp_path):
@@ -66,3 +66,35 @@ def test_status_idle_shapes(tmp_path):
     assert t.time_trial_status()["state"] == "idle"
     s = t.lap_session_status()
     assert s["state"] == "idle" and s["count"] == 0 and s["best"] is None
+
+
+def test_motion_fields_none_listener_is_empty():
+    assert _motion_fields(None) == {}
+
+
+def test_motion_fields_no_fresh_packet_is_empty():
+    class _NoPacket:
+        def latest(self):
+            return None
+
+    assert _motion_fields(_NoPacket()) == {}
+
+
+def test_motion_fields_extracts_yaw_rate_and_accel():
+    class _FakeListener:
+        def latest(self):
+            return {"acc": (1.0, 2.0, 3.0), "ang_vel": (0.1, 0.2, 0.3)}
+
+    out = _motion_fields(_FakeListener())
+    assert out == {"ms_yaw_rate": 0.3, "ms_ax": 1.0, "ms_ay": 2.0, "ms_az": 3.0}
+
+
+def test_motion_field_names_are_recorder_columns():
+    # The recorder must have a CSV column for every key _motion_fields can emit.
+    from beamng_mcp.timing.recorder import RICH_FIELDS
+
+    class _FakeListener:
+        def latest(self):
+            return {"acc": (0.0, 0.0, 0.0), "ang_vel": (0.0, 0.0, 0.0)}
+
+    assert set(_motion_fields(_FakeListener())) <= set(RICH_FIELDS)
