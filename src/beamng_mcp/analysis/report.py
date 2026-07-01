@@ -62,6 +62,7 @@ def analyze_samples(samples: list[Sample]) -> dict:
             "stopped": v.stopped, "reasons": v.reasons,
         },
         "samples": len(samples),
+        "duration_s": round(samples[-1].t - samples[0].t, 2),
         "distance_m": v.distance_m,
         "speed": {
             "max_kmh": round(max(speeds), 1),

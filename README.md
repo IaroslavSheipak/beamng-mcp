@@ -1,270 +1,214 @@
-# beamng-mcp — MCP server for BeamNG.drive (Steam consumer build)
+# beamng-mcp — your AI race engineer for BeamNG.drive
 
-An [MCP](https://modelcontextprotocol.io) server that drives a stock, retail
-**BeamNG.drive** install (Steam, v0.38.6.0) over BeamNGpy — **no BeamNG.tech
-license required**. Because the consumer build exposes only the *classic* polled
-CPU sensors, telemetry is limited to **Electrics / State / Damage / Timer /
-GForces** plus the license-free **OutGauge UDP** dashboard stream. All of the
-BeamNG.tech "automation" sensors (Camera, Lidar, Radar, Ultrasonic, AdvancedIMU,
-Mesh, Powertrain, GPS, RoadsSensor, IdealRadar) are unavailable on this build and
-are deliberately not used anywhere in this server.
+An [MCP](https://modelcontextprotocol.io) server that turns Claude (or any MCP
+client) into a **pit-wall race engineer** for a stock, retail **BeamNG.drive**
+install (Steam) — **no BeamNG.tech license required**. You drive; the AI times
+your laps, analyzes the telemetry, coaches your driving, diagnoses the car's
+balance from how you *say* it feels, and applies real setup changes to the
+car's actual tuning sliders.
 
-> Status: **live-tested on the Steam build** (build 23007233 / v0.38.6).
-> `connect` + `current_vehicles` + `telemetry` are confirmed working end to end
-> (126 Electrics channels). The model is **passive**: you launch and play the
-> game; the server sits idle and only attaches when you ask (e.g. "change car
-> config"), operating on the car you're currently driving. It never launches the
-> game, loads a scenario, or drives — unless you explicitly use the ACTIVE-mode
-> tools (`spawn`, `set_control`, `run_test`).
+```text
+you:    "the car pushes on entry and the rear snaps on throttle"
+Mara:   copy — reading entry understeer, exit oversteer.
+        First move, soften the front anti-roll bar ($arb_spring_F 45000 -> 39600).
+        One change at a time. Re-drive it and I'll prove it either way.
+you:    *drives*
+Mara:   candidate FASTER by 0.84 s — carrying +2.1 km/h through the matched
+        corners; balance moved to neutral. Keeping it. Want it saved as a .pc?
+```
 
-## Install
+## What you can ask for
+
+| You say | What happens |
+| --- | --- |
+| *"set up lap timing here"* | `set_start_line` draws a 3D gate; `start_lap_session` auto-times every flying lap |
+| *"how were my laps?"* | `lap_session_status` / `analyze_lap` — times + grip, balance, braking, per-corner report |
+| *"coach me"* | `lap_coach` — driver-side tips: braking effort vs the car's proven grip, coasting, under-driven corners |
+| *"the car understeers, fix it"* | `race_engineer` — your words + lap telemetry + the car's real `$vars` → a ranked setup plan |
+| *"apply it"* | `apply_setup` — clamped to the car's live ranges; respawns like the in-game Apply |
+| *"did that help?"* | `compare_laps` — baseline vs candidate: lap time, corner speeds, balance shift, verdict |
+| *"something's broken"* | `doctor` — checks paths, the game socket, protocol settings (incl. a corruption that mimics broken game files), ports |
+
+Three **guided workflows** ship as MCP prompts (slash commands in Claude):
+`/first_time_setup` (get connected, step by step), `/pit_wall_session` (the
+full drive → feel → tune → prove loop), `/track_day_debrief` (analyze + coach
++ compare what you just drove).
+
+## Quickstart
+
+**1. Install** (Windows python — the server talks to a Windows game):
 
 ```bat
 cd C:\Users\Iaroslav\beamng-mcp
-.venv\Scripts\python.exe -m pip install -r requirements.txt
+python -m venv .venv
+.venv\Scripts\python.exe -m pip install -e .
 ```
 
-## Paths
+**2. Register with Claude Code.** The console entry point keeps paths simple:
 
-| Name | Value |
-| --- | --- |
-| `GAME_HOME` (install, has `Bin64`) | `C:\Program Files (x86)\Steam\steamapps\common\BeamNG.drive` |
-| `USERFOLDER` (active user data) | `C:\Users\Iaroslav\AppData\Local\BeamNG\BeamNG.drive\current` |
-| `USER_VEHICLES` (user `.pc` configs) | `…\current\vehicles` |
-| `INSTALL_VEHICLES` (stock zips, read-only) | `GAME_HOME\content\vehicles` |
-| Integration host / port | `127.0.0.1` / `25252` |
+```bat
+claude mcp add beamng -- C:\Users\Iaroslav\beamng-mcp\.venv\Scripts\beamng-mcp.exe
+```
 
-Override any of these with environment variables before launch:
-`BEAMNG_HOME`, `BEAMNG_USER`, `BEAMNG_HOST`, `BEAMNG_PORT`. The server runs under
-Windows `python.exe`, so all paths are Windows-style (do not translate to
-`/mnt/c`). Do **not** use `C:\Users\Iaroslav\Documents\BeamNG.drive` — that is a
-stale settings-only stub.
+(From WSL the same registration works — the `.exe` path is what matters. Any
+`.pc`/path arguments this server handles are **Windows** paths; never
+translate them to `/mnt/c/...`.)
 
-## Per-session setup: open the integration socket
-
-BeamNG's Steam **launcher strips custom flags**, so Steam launch options like
-`-tcom` do **not** work (confirmed: the engine's command line drops them). Instead,
-open the socket from the in-game console — verified working on the consumer build,
-and it keeps your normal Steam session intact:
+**3. Open the game's socket** (once per game session). BeamNG's Steam launcher
+strips custom flags, so launch options don't work — use the in-game console:
 
 1. Launch BeamNG.drive (Steam) and get into a vehicle.
-2. Press **`` ` ``/`~`** (tilde, top-left under Esc) to open the Lua console.
-3. Run:
+2. Press **`` ` ``/`~`** (tilde) to open the Lua console and run:
 
 ```lua
 extensions.load('tech/techCore'); tech_techCore.openServer(25252)
 ```
 
-You'll see `Started listening on 127.0.0.1/25252`. The socket stays open until you
-close the game, and Claude can attach on demand. No license is needed —
-`openServer` has no license gate (only tech-only sensors do, which this server
-never uses).
+You'll see `Started listening on 127.0.0.1/25252`. The socket stays open until
+the game closes. (Alternative, no typing: a shortcut to
+`Bin64\BeamNG.drive.x64.exe -tcom -tport 25252` opens it automatically but
+bypasses Steam.)
 
-**Alternative (no per-session typing):** launch the engine directly via a shortcut/
-`.bat` to `Bin64\BeamNG.drive.x64.exe -tcom -tport 25252 -gfx dx11`. That opens the
-socket automatically but bypasses the Steam launcher.
+**4. Enable the telemetry protocols** (once, in-game, `Options > Others >
+Protocols`):
 
-## Use it (passive workflow)
+- **OutGauge UDP**: IP `127.0.0.1`, port `4444`, ID blank → drive logging.
+- **MotionSim** (optional but recommended): IP `127.0.0.1`, port **`4445`**
+  (not blank — blank collides with OutGauge!), update rate `60` → laps get
+  true yaw rate + gravity-excluded accel.
 
-1. Launch BeamNG.drive (Steam) and drive normally — any car, any level.
-2. When you want a change, ask Claude (e.g. *"claude, change car config"*,
-   *"what's my engine doing?"*, *"give it more boost"*). Claude then:
-   - `connect()` — attaches to your running game (no takeover),
-   - `current_vehicles()` / `telemetry()` — finds and reads the car you're in,
-   - `get_config()` → modify → `set_config()` — applies the change in place
-     (BeamNG respawns your car with the new parts, like the in-game menu),
-   - `disconnect()` — drops the socket; **your game keeps running**.
+**5. Check it**: ask Claude to run `doctor` — every failed check comes with
+its exact fix. Then just drive and talk.
 
-Nothing happens until you ask. `spawn` / `set_control` / `run_test` are ACTIVE
-mode and only run if you explicitly request a fresh car, driving, or a test.
+The model is **passive**: you launch and play the game; the server attaches
+only when you ask and detaching leaves the game running. It never drives or
+spawns anything unless you explicitly use the ACTIVE-mode tools
+(`spawn`, `set_control`, `run_test`).
 
-## Enable OutGauge (for `outgauge_telemetry`)
+## Paths / configuration
 
-In **BeamNG.drive**: `Options > Other > Protocols` → enable **"OutGauge UDP
-protocol"**; set **IP `127.0.0.1`**, **Port `4444`**; leave the **OutGauge ID
-blank** (this yields 92-byte packets; a non-blank ID yields 96-byte packets,
-which the parser also handles). A restart is not required but is recommended.
-
-## Run / register with Claude
-
-The MCP child process is a **Windows** `python.exe`, so it only understands
-**Windows** paths. Even when you register from WSL, the *script argument* must be a
-Windows path (WSL interop translates the interpreter binary path, but passes
-arguments through literally — a `/mnt/c/...` script arg fails with
-"can't open file ... No such file or directory").
-
-Register from a **Windows** Claude Code shell (simplest, all paths native):
-
-```bat
-claude mcp add beamng-mcp -- C:\Users\Iaroslav\beamng-mcp\.venv\Scripts\python.exe C:\Users\Iaroslav\beamng-mcp\server.py
-```
-
-Or register from **WSL**, passing the script as a Windows path (note the `.exe`
-interpreter is auto-translated, but the script arg is given Windows-style):
-
-```bash
-claude mcp add beamng-mcp -- \
-  /mnt/c/Users/Iaroslav/beamng-mcp/.venv/Scripts/python.exe \
-  "$(wslpath -w /mnt/c/Users/Iaroslav/beamng-mcp/server.py)"
-```
-
-`wslpath -w` yields `C:\Users\Iaroslav\beamng-mcp\server.py`. `BEAMNG_HOME`,
-`BEAMNG_USER`, and all `.pc` paths are likewise Windows-only.
-
-The server speaks MCP over **stdio**. You can also launch it directly on Windows:
-
-```bat
-C:\Users\Iaroslav\beamng-mcp\.venv\Scripts\python.exe C:\Users\Iaroslav\beamng-mcp\server.py
-```
-
-Run the offline self-check (no game needed):
-
-```bat
-C:\Users\Iaroslav\beamng-mcp\.venv\Scripts\python.exe smoke_test.py
-```
-
-## Tools
-
-| Tool | Mode | Notes |
+| Env var | Default | Meaning |
 | --- | --- | --- |
-| `connect` | attach | default `launch=False`: attaches to your running game; leaves it running on disconnect |
-| `disconnect` | attach | drops the socket; does **not** close your game |
-| `status` | offline | connection state |
-| `current_vehicles` | attach | lists in-game vehicles, flags the player's car (live-tested) |
-| `telemetry` | attach | 126 Electrics channels + Damage/GForces + State (current car); **falls back to GE-state + OutGauge** if the per-vehicle socket is down after a respawn |
-| `get_config` | attach | compact config of your current car: installed parts + tuning vars (GE-side, robust) |
-| `set_config` | attach | apply parts to your current car (respawns it in place) |
-| `list_vehicle_models` | offline | install zips + user dirs + stock fallback |
-| `list_configs` | offline | scans USER_VEHICLES for `*.pc` |
-| `read_pc` / `write_pc` | offline | `.pc` JSON, confined to USER_VEHICLES |
-| `outgauge_telemetry` | offline parser | needs OutGauge enabled in-game |
-| `spawn` / `set_control` / `run_test` | ACTIVE | only when you explicitly ask Claude to spawn / drive / test |
-| `start_logging` / `stop_logging` | drive log | record OutGauge to a CSV in `logs/`; `stop` returns a run summary (robust — no per-vehicle socket) |
-| `summarize_drive` | offline | summarize a recorded drive (distance, top/avg speed, 0–100, gear usage, speed trace) |
-| `vehicle_lua` | analysis | run a Lua chunk on the current car and return its value — deep introspection (powertrain, suspension, beams) for "analyze & improve" |
-| `start_lap` / `stop_lap` | race engineer | record a **rich** telemetry lap (lat/long/vert G, yaw heading, steering, throttle/brake) at ~30 Hz; `stop` auto-analyzes it |
-| `analyze_lap` | offline | turn a recorded lap into engineer metrics: grip/friction-circle, understeer↔oversteer **balance index per corner phase**, braking, ride/bottoming, auto-detected symptoms |
-| `race_engineer` | **headline** | tell it the *feel* ("understeer on entry", "rear loose on throttle"); it cross-references your words + lap telemetry + the car's real `$vars` → a ranked, specific setup plan + pit-wall brief |
-| `get_tuning_full` | attach | the car's **full** tunable surface (every `$var` with live val/default/min/max/unit/title) from the vehicle VM — what the in-game Tuning menu sees |
-| `set_tuning` / `apply_setup` | attach | apply tuning `$vars` (clamped to live min/max; **respawns** like the Tuning menu's Apply); `apply_setup` takes a `race_engineer` plan and can persist a `.pc` |
-| `set_tire_pressure` | attach | set front/rear tire psi **LIVE** (no respawn) via the vehicle's pressure groups |
-| `wheel_telemetry` | analysis | per-wheel Lua probe: wheelSpeed, angularVelocity, brake surface temp (lockup / brake-bias / thermal inference) |
-| `reconnect` | attach | close + reopen the GE socket; recovers a stale session after a game restart (no manual disconnect/connect) |
-| `set_start_line` / `clear_gates` | race engineer | mark the car's position as the start/finish line (draws a 3D gate + label); `clear_gates` removes all gate visuals incl. orphans |
-| `start_time_trial` / `time_trial_status` / `stop_time_trial` | race engineer | 3-2-1-GO countdown → records a rich lap → auto-times on a true start/finish **line crossing** → shows the time in-game |
-| `start_lap_session` / `lap_session_status` / `last_lap` / `stop_lap_session` | race engineer | hands-off auto-lap: just drive — every flying lap self-times (line crossing) + records its own CSV |
-| `set_traction_control` | attach | toggle the drivingDynamics TC supervisor **LIVE** (no respawn) for an on/off A/B; errors if the car has no TC to change |
-| `list_parts` / `swap_parts` / `save_config` | attach | fitment-aware part editing: list slots + suitable parts, swap a part (respawns), persist to a `.pc` |
-| `car_mass` | attach | real vehicle mass (total, optionally without wheels) |
+| `BEAMNG_HOME` | `C:\Program Files (x86)\Steam\steamapps\common\BeamNG.drive` | install dir (has `Bin64`) |
+| `BEAMNG_USER` | `C:\Users\Iaroslav\AppData\Local\BeamNG\BeamNG.drive\current` | active user profile (`.pc` configs live in `vehicles\`) |
+| `BEAMNG_HOST` / `BEAMNG_PORT` | `127.0.0.1` / `25252` | the tech socket |
+| `BEAMNG_LOGS_DIR` | `<cwd>\logs` | where lap/drive CSVs land |
 
-Every tool returns a JSON object `{"ok": bool, ...}` and never raises across the
-MCP boundary. Tools that need the game return
-`{"ok": false, "error": "not connected; call connect first"}` (or a clear
-per-vehicle error) instead of a traceback.
+## The race-engineer loop
 
-## AI Race Engineer (the "drive a lap, tune like F1" loop)
-
-The headline workflow: **drive → describe the feel → get a telemetry-grounded
-setup change** on the car's real tuning sliders, like a race engineer on the pit
-wall (her name is Mara).
-
-1. **Drive a lap.** `start_lap()` records rich telemetry (lateral/longitudinal/
-   vertical G from GForces, yaw from heading, steering, throttle/brake,
-   wheelspeed) at ~30 Hz to `logs/lap_*.csv`. `stop_lap()` ends it and
+1. **Time laps.** Three flavors, one shared recorder (mutually exclusive by
+   construction): `start_lap`/`stop_lap` (manual), `start_time_trial`
+   (3-2-1-GO countdown, one auto-timed lap), `start_lap_session` (hands-off —
+   every flying lap self-times). Laps close on a true interpolated
+   **line crossing**, not a proximity radius, so hairpins and pit lanes don't
+   false-trigger. Every lap records ~30 Hz rich telemetry to a CSV and
    auto-analyzes.
-2. **Tell the engineer how it felt** in plain language — `race_engineer("understeer
-   on entry, then the rear steps out on throttle")`. It:
-   - parses your words into per-phase symptoms (entry/mid/exit/braking/kerb),
-   - merges them with the **telemetry-detected** symptoms from the lap
-     (agreement boosts confidence; the lap can confirm or contradict the feel),
-   - reads the car's **real** tunable `$vars` (`get_tuning_full`, from the vehicle
-     VM — the same list the in-game Tuning menu shows, with live min/max),
-   - returns a **ranked, specific plan**: which slider, which way, how much, and
-     why — e.g. *"P1 soften front anti-roll bar `$arb_spring_F` 45000→39600
-     (−12%)"* — plus a pit-wall brief.
-3. **Apply it.** `apply_setup(plan=...)` (or `set_tuning({"$arb_spring_F": 39600})`)
-   writes the vars — clamped to the car's live range — and respawns the car
-   (exactly like the Tuning menu's *Apply*). `save_as` persists a `.pc`.
-   `set_tire_pressure(24, 26)` is a **live** trim (no respawn).
-4. **Re-drive and confirm.** One change at a time; re-record; compare the balance
-   index before/after.
+2. **Read the lap.** The report carries **validity gating** (a crash/stopped
+   lap is flagged, never silently compared to a hot lap), an impact-cleaned
+   **grip envelope** (a wall hit can't inflate it), a **self-calibrated
+   balance index** (honest `null` when the lap can't calibrate it), braking,
+   ride, and per-corner minimum speeds.
+3. **Tell Mara how it felt.** `race_engineer("understeer on entry, loose on
+   throttle")` merges your words with the telemetry symptoms (agreement boosts
+   confidence), reads the car's **real** tunable surface (`get_tuning_full` —
+   same list as the in-game Tuning menu, with live min/max), and returns a
+   ranked plan: which slider, which way, how much, why.
+4. **Apply and prove.** `apply_setup(plan)` (respawns, like the in-game
+   Apply); `set_tire_pressure` is live, no respawn. Re-drive, then
+   `compare_laps` gives the verdict: lap-time delta, matched-corner speeds,
+   balance shift. `save_config` persists the build as a `.pc` the in-game
+   config menu can load.
 
-> **Lap-timing modes (use one at a time — they share one recorder).** Step 1 has
-> three flavors: `start_lap`/`stop_lap` (manual single lap); `start_time_trial`
-> (3-2-1-GO countdown → one auto-timed lap); and `start_lap_session` (hands-off —
-> just keep driving, every flying lap self-times). All close a lap on a true
-> start/finish **line crossing**, interpolated between samples — not a proximity
-> radius — so adjacent straights, hairpins and pit lane don't false-trigger.
+What it tunes (resolved per-car at runtime, never hardcoded): springs,
+anti-roll bars, bump & rebound damping, ride height, camber/toe/caster, brake
+bias, differential, tire pressure — whatever the installed parts actually
+expose. `list_parts`/`swap_parts` handle fitment-aware part changes (e.g. the
+etk800 needs Rally/Race coilovers before spring/damper sliders exist).
 
-What it tunes (resolved per-car at runtime, never hardcoded): springs, anti-roll
-bars, **bump & rebound damping**, ride height, camber, toe, caster, brake bias,
-differential (preload / power / coast), tire pressure — whichever the installed
-parts actually expose. The knowledge base is grounded in sim-racing/motorsport
-setup theory (iRacing/ACC/MoTeC); the analysis implements MoTeC-style metrics
-(friction circle, understeer/balance index, per-corner segmentation).
+## Tools (47)
 
-**Honest limits (consumer build).** The balance index uses the normalized
-`steering` channel (−1..1, not road-wheel degrees), so it is **relative/trend**
-(great for before/after deltas, not absolute degrees). There is no suspension-
-travel channel, so the true damper-velocity histogram degrades to a gz-based
-bottoming/settle proxy — but you can still **tune the rebound `$vars` directly**.
-Geometry vars (camber/toe/caster) are unitless multipliers whose jbeam min/max can
-be reversed, so those moves are flagged low-confidence ("verify in-game").
+**Connection & health** — `connect`, `disconnect`, `reconnect`, `status`,
+`doctor`
 
-**Suspension note (etk800).** The stock/lifted struts expose **no** spring/damper
-sliders; the **Rally** or **Race** coilovers expose spring + bump + rebound (Rally
-also adds fast-bump and keeps adjustable ride height). `race_engineer.py swap
-rally` fits them. Enumerate first with `get_tuning_full` — the engineer degrades
-gracefully to whatever the car exposes (e.g. ARB + diff + brake bias if dampers
-aren't available).
+**Your car, live** — `current_vehicles`, `telemetry`, `wheel_telemetry`,
+`car_mass`, `outgauge_telemetry`, `vehicle_lua` (advanced Lua introspection)
 
-There's a `race_engineer.py` CLI that drives this whole loop against a live game
-(it reuses the same `session.py` code the MCP serves): `vars`, `record <secs>`,
-`analyze`, `advise "<feel>"`, `apply '<$var json>'`, `pressure <f> <r>`,
-`swap rally|race`, and `demo` (an end-to-end live self-check).
+**Lap timing** — `set_start_line`, `clear_gates`, `start_lap`, `lap_status`,
+`stop_lap`, `start_time_trial`, `time_trial_status`, `stop_time_trial`,
+`start_lap_session`, `lap_session_status`, `last_lap`, `stop_lap_session`
 
-### `.pc` config confinement (security)
+**Analysis & coaching** — `analyze_lap`, `compare_laps`, `lap_coach`,
+`summarize_drive`, `start_logging`, `stop_logging`
 
-`read_pc` / `write_pc` operate **only** inside `USER_VEHICLES`. Names containing
-`/`, `\`, `:`, `..`, path separators, or characters outside `[A-Za-z0-9 _-.]`
-are rejected, and the resolved real path is checked with `commonpath` to defeat
-symlink / `..` escapes. The `.pc` extension is forced automatically.
+**Race engineer & tuning** — `race_engineer`, `get_tuning_full`, `set_tuning`,
+`apply_setup`, `set_tire_pressure`, `set_traction_control` (live A/B),
+`get_config`, `set_config`, `list_parts`, `swap_parts`, `save_config`
 
-## Limitations
+**Configs & content** — `list_vehicle_models`, `list_configs`, `read_pc`,
+`write_pc` (confined to the user vehicles folder; path-escape hardened)
 
-- **No BeamNG.tech sensors.** Camera / Lidar / Radar / Ultrasonic / AdvancedIMU /
-  Mesh / Powertrain / GPS / RoadsSensor / IdealRadar are license-gated and return
-  nothing on this build; they are not exposed.
-- **`set_config` respawns and repairs** the car (resets damage) — this is a
-  beamngpy/engine side-effect of changing parts, same as the in-game parts menu.
-- **Steam auto-updates** can break the beamngpy↔game protocol (you'll see a
-  version-handshake error on connect). If a game update lands, re-pin `beamngpy`
-  to the version matching the new game minor (e.g. game `0.38` → `beamngpy==1.35.x`)
-  and reconnect.
-- Core attach tools (`connect` / `current_vehicles` / `telemetry`) are
-  **live-tested** on the Steam build. `set_config` apply and the ACTIVE-mode tools
-  (`spawn` / `set_control` / `run_test`) are implemented against the verified API
-  but exercise less-common paths — sanity-check them the first time you use them.
+**ACTIVE mode** (only when you explicitly ask) — `spawn`, `set_control`,
+`run_test`
+
+Every tool returns `{"ok": bool, ...}` and never raises across the MCP
+boundary — failures come back as a clear message plus the usual fix.
+
+## Honest limits (consumer build)
+
+- **No BeamNG.tech sensors.** Camera/Lidar/Radar/IMU etc. are license-gated
+  and deliberately unused. Telemetry is the classic polled set
+  (Electrics/State/Damage/GForces) + license-free OutGauge/MotionSim UDP.
+- The **balance index** uses the normalized steering channel, so it's a
+  relative/trend metric (excellent for before/after deltas, not absolute
+  degrees) — and it reports `null` rather than a number it can't stand behind.
+- No suspension-travel channel: ride/bottoming is a **gz proxy** (flagged as
+  such). Geometry vars (camber/toe/caster) are unitless multipliers with
+  sometimes-reversed jbeam ranges — those plan items are flagged
+  low-confidence.
+- **Applying parts/tuning respawns the car** (repairs it, resets pose) — an
+  engine-side effect, same as the in-game parts menu.
+- **Steam auto-updates** can break the beamngpy↔game handshake: re-pin
+  `beamngpy` to the matching minor (game `0.38.x` ↔ `beamngpy==1.35.x`).
+  `doctor` reminds you of the pairing.
 
 ## Troubleshooting
 
-- **`WinError 10061` / `ConnectionRefusedError` on connect** — BeamNG.drive is not
-  running, is on a different port, or the integration port is blocked by Windows
-  Firewall. Start the game (or `connect(launch=True)`), confirm port `25252`, and
-  allow BeamNG.drive through the firewall, then retry.
-- **How `connect(launch=True)` actually works (no tech license needed)** —
-  beamngpy starts its **own** instance of `Bin64\BeamNG.drive.x64.exe` with
-  `-nosteam -tcom -tport 25252` (verified in `beamngpy/beamng/beamng.py`,
-  `_prepare_call`). The integration server is enabled by the **`-tcom`** flag plus
-  the `tech\` Lua layer that already ships inside your retail install — there is
-  **no license file, no `BeamNGpy.zip` mod, and no `researchHelper.txt`** involved
-  (those are pre-1.x artifacts and do not exist in beamngpy 1.35.1). Consequence:
-  do **not** pre-launch the game through Steam and expect `connect(launch=False)`
-  to find it. Either let `launch=True` start the instance, or start the game
-  yourself with `-tcom -tport 25252` first and then call `connect(launch=False)`.
-- **Connect hangs / times out on first launch** — the game can take 30–60s to
-  reach the point where the `-tcom` socket accepts connections; beamngpy waits and
-  retries internally. If it ultimately fails, confirm no other instance is already
-  bound to port 25252.
-- **`outgauge_telemetry` always `received: false`** — OutGauge is not enabled, or
-  the IP/port don't match the game's protocol settings (see "Enable OutGauge").
+Run `doctor` first — it automates most of this table.
+
+- **`WinError 10061` / connection refused** — the game isn't running or the
+  tech socket was never opened this session (see Quickstart step 3), or a
+  firewall blocks port 25252.
+- **Every vehicle spawn fails game-wide, looks like corrupted files, survives
+  reinstall** — a known settings corruption: BeamNG's Protocols UI can persist
+  a stray keystroke (e.g. `"j"`) into a numeric `protocols_*` setting in
+  `<user>\settings\settings.json`; the game does arithmetic on it with no type
+  guard. `doctor` detects it; fix by setting the key to a number (update-rate
+  default is `60`) and restarting.
+- **`connect(launch=True)`** starts the server's **own** game instance with
+  `-nosteam -tcom -tport 25252` (no license, no mods involved). Don't
+  pre-launch via Steam and expect `launch=False` to find it — open the socket
+  in-game first (step 3).
+- **First launch hangs** — the game needs 30–60 s before the socket accepts;
+  beamngpy retries internally.
+- **`outgauge_telemetry` says `received: false`** — OutGauge isn't enabled, or
+  IP/port mismatch, or you're in a menu (the game only streams in-vehicle).
+- **Per-vehicle tools wedge after many reconnects** (`KeyError('result')`) —
+  a game-side per-vehicle socket wedge; restart BeamNG.drive and reopen the
+  socket. Prefer one long-lived server session over repeated short-lived
+  connects.
+
+## Development
+
+```bat
+.venv\Scripts\python.exe -m pytest -q     & REM 149 tests, offline, ~7 s
+.venv\Scripts\python.exe -m ruff check src tests
+.venv\Scripts\python.exe -m mypy
+```
+
+Layout: `src/beamng_mcp/` — `server.py` (FastMCP tool layer + prompts),
+`app.py` (service wiring), `sim/` (the verified BeamNGpy integration layer:
+connection, vehicle handles, Lua contracts, tuning, OutGauge/MotionSim UDP,
+doctor), `timing/` (one lap-timing state machine + rich recorder + line
+geometry), `analysis/` (validity-gated, impact-cleaned lap metrics; compare;
+coach), `engineer/` (the symptom→lever knowledge base + advisor). Design
+history and the porting contract live in `REBUILD.md`.

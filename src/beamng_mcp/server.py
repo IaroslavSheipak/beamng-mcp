@@ -5,6 +5,8 @@ GForces) plus license-free OutGauge/MotionSim UDP telemetry. Every tool returns
 a JSON-serializable ``{"ok": ...}`` dict and never raises across the MCP
 boundary -- :func:`_call` catches the service layer's typed errors
 (``BeamNGError``/``LuaError``/``ValueError``/...) into :func:`errors.from_exc`.
+Guided workflows (first-time setup, the pit-wall session, the track-day
+debrief) ship as MCP prompts and surface as slash commands in clients.
 
 Run:
     beamng-mcp                       (installed console entry point)
@@ -17,12 +19,17 @@ from collections.abc import Callable
 
 from mcp.server.fastmcp import FastMCP
 
+from .analysis import coach as coach_mod
+from .analysis import compare as compare_mod
+from .analysis.ingest import load_lap
 from .analysis.report import analyze_lap as analyze_lap_file
 from .app import APP, App
 from .errors import BeamNGError, from_exc, ok
+from .sim import doctor as doctor_mod
 from .sim import drivelog, lua, outgauge, pc_config, scenario, tuning, vehicle
 from .sim import telemetry as telemetry_svc
 from .timing.recorder import latest_lap as latest_rich_lap
+from .timing.recorder import recent_laps
 
 
 def _call(fn: Callable[..., object], *args: object, **kwargs: object) -> dict:
@@ -77,6 +84,26 @@ def create_server(app: App = APP) -> FastMCP:
     def status() -> dict:
         """Report connection state, active scenario, spawned vehicles, config."""
         return _call(sim.status)
+
+    @mcp.tool()
+    def doctor() -> dict:
+        """Health-check EVERYTHING (run this first when anything misbehaves, or
+        for first-time setup): game install + user folder paths, whether the
+        game is listening on the tech socket, OutGauge/MotionSim protocol
+        settings — including the known settings corruption that silently breaks
+        every vehicle spawn game-wide — port collisions, a live OutGauge probe,
+        and the beamngpy/game version pairing. Each finding comes with the
+        exact fix. Needs no connection."""
+
+        def _doctor() -> dict:
+            connected = False
+            try:
+                connected = bool(sim.status().get("connected"))
+            except Exception:  # noqa: BLE001 — status must never block the doctor
+                pass
+            return doctor_mod.run_doctor(app.settings, connected=connected)
+
+        return _call(_doctor)
 
     @mcp.tool()
     def current_vehicles() -> dict:
@@ -237,6 +264,12 @@ def create_server(app: App = APP) -> FastMCP:
         return _call(timer.stop_lap)
 
     @mcp.tool()
+    def lap_status() -> dict:
+        """Poll the manual lap recording: is it running, samples so far,
+        elapsed time, the CSV path."""
+        return _call(timer.lap_status)
+
+    @mcp.tool()
     def analyze_lap(path: str | None = None) -> dict:
         """Analyze a recorded rich lap (default: most recent) into engineer
         metrics: grip envelope, balance/slip angle, braking, ride, symptoms.
@@ -249,6 +282,59 @@ def create_server(app: App = APP) -> FastMCP:
             return analyze_lap_file(p)
 
         return _call(_analyze)
+
+    @mcp.tool()
+    def compare_laps(path_a: str | None = None, path_b: str | None = None) -> dict:
+        """Compare two recorded laps — the 'did that setup change actually
+        help?' tool. Defaults to the two most recent laps (older = baseline,
+        newer = candidate). Returns lap-time delta, per-metric deltas (grip,
+        balance, braking, corner speeds) and a plain-language verdict. Pure
+        analysis; no game needed."""
+
+        def _compare() -> dict:
+            a, b = path_a, path_b
+            if a is None and b is None:
+                laps = recent_laps(app.settings.logs_dir, 2)
+                if len(laps) < 2:
+                    raise BeamNGError(
+                        f"need two recorded laps in {app.settings.logs_dir} to compare "
+                        "— drive a baseline lap and a candidate lap first")
+                a, b = laps[0], laps[1]
+            elif a is None or b is None:
+                given = a or b
+                latest = latest_rich_lap(app.settings.logs_dir)
+                if not latest or latest == given:
+                    raise BeamNGError("only one lap available — pass both paths explicitly")
+                a, b = (given, latest) if b is None else (latest, given)
+            assert a is not None and b is not None
+            return compare_mod.compare_lap_files(a, b)
+
+        return _call(_compare)
+
+    @mcp.tool()
+    def lap_coach(path: str | None = None) -> dict:
+        """DRIVING coach (the driver-side twin of race_engineer): reads a
+        recorded lap (default: most recent) and returns technique tips —
+        braking effort vs the car's proven grip, coasting time, under-driven
+        corners, steering sawing — each with confidence + honest caveats. For
+        car-side setup changes use race_engineer instead."""
+
+        def _coach() -> dict:
+            p = path or latest_rich_lap(app.settings.logs_dir)
+            if not p:
+                raise BeamNGError(f"no recorded laps found in {app.settings.logs_dir}")
+            samples = load_lap(p)
+            if not samples:
+                raise BeamNGError(f"no usable samples in {p}")
+            report = analyze_lap_file(p)
+            out = coach_mod.coach(samples, report)
+            out["path"] = p
+            out["lap"] = {"duration_s": report.get("duration_s"),
+                          "distance_m": report.get("distance_m"),
+                          "valid": report.get("valid")}
+            return out
+
+        return _call(_coach)
 
     @mcp.tool()
     def race_engineer(feedback: str, lap_path: str | None = None,
@@ -379,6 +465,72 @@ def create_server(app: App = APP) -> FastMCP:
     def clear_gates() -> dict:
         """Wipe ALL start/finish gates + the live timer text from the world."""
         return _call(timer.clear_gates)
+
+    # === guided workflows (MCP prompts — surface as slash commands) ===========
+    @mcp.prompt(description="First-time setup: get BeamNG.drive talking to this server")
+    def first_time_setup() -> str:
+        return (
+            "Walk the user through getting BeamNG.drive connected, one step at a time.\n"
+            "1. Call doctor() and go through its findings with them — every failed check "
+            "comes with the exact fix. Do not continue until the 'tech socket' check passes "
+            "(they must launch the game and open the socket from the in-game console: press "
+            "~ and run  extensions.load('tech/techCore'); tech_techCore.openServer(25252) ).\n"
+            "2. Encourage the OutGauge and MotionSim warnings' fixes (Options > Others > "
+            "Protocols) — OutGauge enables drive logging, MotionSim (port 4445) upgrades lap "
+            "analysis with true yaw rate.\n"
+            "3. Call connect(), then current_vehicles() and telemetry() to prove the loop — "
+            "tell them what car they're in and something live (rpm/speed).\n"
+            "4. Point at what's next: 'drive and ask me anything — lap timing "
+            "(start_lap_session), tuning (race_engineer), or a checkup (doctor)'.\n"
+            "Keep each step short; wait for them to confirm before the next."
+        )
+
+    @mcp.prompt(description="Full pit-wall session: time laps, describe the feel, tune, prove it")
+    def pit_wall_session() -> str:
+        return (
+            "You are the interface to Mara, the AI race engineer. Run a real pit-wall "
+            "session — short, decisive radio calls, no fluff.\n"
+            "1. connect() if needed; current_vehicles() + get_tuning_full() to learn the car "
+            "and which sliders it actually exposes (never promise a lever it lacks).\n"
+            "2. Ask where they're driving and what the goal is (lap time / fix the balance / "
+            "build a setup).\n"
+            "3. Have them drive to where the lap should start, then set_start_line() and "
+            "start_lap_session() — they just drive; every flying lap times itself. Poll "
+            "lap_session_status() when they ask.\n"
+            "4. After 2-3 laps: last_lap() for the time + telemetry report. Give the one-line "
+            "read (balance tendency, where the grip is). If the report says the lap is "
+            "invalid, say so and ask for a clean one — never coach off a crash lap.\n"
+            "5. Ask how the car FELT (entry/mid/exit, brakes, kerbs) and pass their words "
+            "verbatim to race_engineer(feedback). Present the ranked plan with its "
+            "confidence labels and caveats.\n"
+            "6. On approval: apply_setup(plan) — warn that the car respawns in place. ONE "
+            "change at a time.\n"
+            "7. They re-drive; compare_laps() to prove or bust the change (baseline vs "
+            "candidate). Report the verdict honestly — a change that didn't help gets "
+            "rolled back, not defended.\n"
+            "8. When they're happy: save_config(name) so the build persists in the in-game "
+            "config menu. lap_coach() at the end if they want driver-side homework.\n"
+            "If anything misbehaves (connection, telemetry, spawns): doctor() first."
+        )
+
+    @mcp.prompt(description="Debrief what I just drove: lap times, coaching, what changed")
+    def track_day_debrief() -> str:
+        return (
+            "Debrief the user's most recent driving from the recorded data — no game "
+            "connection needed.\n"
+            "1. analyze_lap() for the latest lap. Lead with the headline numbers: lap "
+            "duration, distance, max/avg speed, balance tendency, and whether the lap was "
+            "VALID — if not, say why (stopped / too short / crash-contaminated) and treat "
+            "everything after as provisional.\n"
+            "2. lap_coach() — deliver the driver-side tips in plain language, strongest "
+            "evidence first, with each tip's caveat.\n"
+            "3. If at least two laps exist: compare_laps() and report the verdict — faster "
+            "or slower, and WHICH metrics moved (corner speed, braking, balance).\n"
+            "4. Close with one concrete next action: a driving change (from the coach), a "
+            "setup change (offer to run race_engineer with how the car felt), or 'drive "
+            "more laps' if the data is too thin to trust.\n"
+            "Be honest about confidence — never present a low-confidence metric as fact."
+        )
 
     return mcp
 

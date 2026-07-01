@@ -113,6 +113,17 @@ tests/
    fix as always (restart BeamNG, reopen the tech socket). For a real session, reuse ONE long-lived `App()` /
    MCP server process rather than one-shot scripts.
 
+## v2.1 — the user-friendliness layer (post-rebuild)
+
+On top of the rebuilt core: `compare_laps` (baseline-vs-candidate deltas +
+verdict — closes the tune → re-drive → confirm loop), `lap_coach` (driver-side
+technique tips, the driver/car split made explicit), `doctor` (one-call
+diagnostics encoding the Phase-4 live findings: the non-numeric
+`protocols_*` settings corruption, the MotionSim/OutGauge port collision, the
+beamngpy↔game version pairing), `lap_status`, and three guided-workflow MCP
+prompts (`first_time_setup`, `pit_wall_session`, `track_day_debrief`).
+47 tools; 149 tests. Legacy v1 root modules removed (git history keeps them).
+
 ## Definition of done (professional)
 
 - pip-installable, pinned deps, entry point ✅

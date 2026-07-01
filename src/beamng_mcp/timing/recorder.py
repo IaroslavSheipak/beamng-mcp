@@ -161,16 +161,24 @@ class RichLapRecorder:
             self._stop.set()
 
 
-def latest_lap(logs_dir: str) -> str | None:
-    """Newest ``lap_*.csv`` in ``logs_dir``, or None."""
+def recent_laps(logs_dir: str, n: int = 2) -> list[str]:
+    """The ``n`` newest ``lap_*.csv`` paths in ``logs_dir``, newest LAST (so
+    ``recent_laps(d, 2)`` reads as (baseline, candidate))."""
     if not os.path.isdir(logs_dir):
-        return None
+        return []
     csvs = [
         os.path.join(logs_dir, f)
         for f in os.listdir(logs_dir)
         if f.startswith("lap_") and f.endswith(".csv")
     ]
-    return max(csvs, key=os.path.getmtime) if csvs else None
+    csvs.sort(key=os.path.getmtime)
+    return csvs[-n:] if n > 0 else []
+
+
+def latest_lap(logs_dir: str) -> str | None:
+    """Newest ``lap_*.csv`` in ``logs_dir``, or None."""
+    laps = recent_laps(logs_dir, 1)
+    return laps[-1] if laps else None
 
 
 def read_lap_csv(path: str) -> list[dict]:
