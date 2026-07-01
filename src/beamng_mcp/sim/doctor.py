@@ -236,6 +236,16 @@ def run_doctor(settings: Settings, connected: bool | None = None,
     session is already attached; ``probe_outgauge=False`` skips the (blocking)
     UDP listen — used by tests and anything latency-sensitive."""
     checks = _paths_checks(settings)
+    if settings.full_surface:
+        checks.append(_check(
+            "tool surface", "ok",
+            "FULL — all tools exposed (ACTIVE mode, .pc files, raw Lua, part "
+            "swapping, drive logging, alternate timing modes)"))
+    else:
+        checks.append(_check(
+            "tool surface", "ok",
+            "core — the essential engineer loop only; set BEAMNG_FULL_SURFACE=1 "
+            "in the server's environment to expose the full tool surface"))
     checks.append(_beamngpy_check())
     sock = _socket_check(settings, connected)
     checks.append(sock)

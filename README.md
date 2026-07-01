@@ -93,6 +93,7 @@ spawns anything unless you explicitly use the ACTIVE-mode tools
 | `BEAMNG_USER` | `C:\Users\Iaroslav\AppData\Local\BeamNG\BeamNG.drive\current` | active user profile (`.pc` configs live in `vehicles\`) |
 | `BEAMNG_HOST` / `BEAMNG_PORT` | `127.0.0.1` / `25252` | the tech socket |
 | `BEAMNG_LOGS_DIR` | `<cwd>\logs` | where lap/drive CSVs land |
+| `BEAMNG_FULL_SURFACE` | unset (core) | `1` exposes all 47 tools instead of the 21-tool core |
 
 ## The race-engineer loop
 
@@ -125,31 +126,43 @@ bias, differential, tire pressure — whatever the installed parts actually
 expose. `list_parts`/`swap_parts` handle fitment-aware part changes (e.g. the
 etk800 needs Rally/Race coilovers before spring/damper sliders exist).
 
-## Tools (47)
+## Tools — a minimal core by default (21), the full surface on demand (47)
 
-**Connection & health** — `connect`, `disconnect`, `reconnect`, `status`,
-`doctor`
+By default the server exposes only the **core**: the complete engineer loop
+with no dead ends, and nothing else — less for the client model to wade
+through, fewer ways to hold it wrong.
 
-**Your car, live** — `current_vehicles`, `telemetry`, `wheel_telemetry`,
-`car_mass`, `outgauge_telemetry`, `vehicle_lua` (advanced Lua introspection)
+**Core — connection & health**: `doctor`, `connect`, `disconnect`,
+`reconnect`, `status`
+**Core — your car**: `current_vehicles`, `telemetry`, `get_tuning_full`
+**Core — lap timing** (the hands-off mode): `set_start_line`,
+`start_lap_session`, `lap_session_status`, `last_lap`, `stop_lap_session`,
+`clear_gates`
+**Core — analysis & coaching**: `analyze_lap`, `compare_laps`, `lap_coach`
+**Core — tune & prove**: `race_engineer`, `apply_setup` (takes a plan or a
+`{"$var": value}` map), `set_tire_pressure` (live, no respawn), `save_config`
 
-**Lap timing** — `set_start_line`, `clear_gates`, `start_lap`, `lap_status`,
-`stop_lap`, `start_time_trial`, `time_trial_status`, `stop_time_trial`,
-`start_lap_session`, `lap_session_status`, `last_lap`, `stop_lap_session`
+The **full surface** adds 26 power tools — set `BEAMNG_FULL_SURFACE=1` in the
+server's environment:
 
-**Analysis & coaching** — `analyze_lap`, `compare_laps`, `lap_coach`,
-`summarize_drive`, `start_logging`, `stop_logging`
+```bat
+claude mcp add beamng --env BEAMNG_FULL_SURFACE=1 -- C:\Users\Iaroslav\beamng-mcp\.venv\Scripts\beamng-mcp.exe
+```
 
-**Race engineer & tuning** — `race_engineer`, `get_tuning_full`, `set_tuning`,
-`apply_setup`, `set_tire_pressure`, `set_traction_control` (live A/B),
-`get_config`, `set_config`, `list_parts`, `swap_parts`, `save_config`
-
-**Configs & content** — `list_vehicle_models`, `list_configs`, `read_pc`,
-`write_pc` (confined to the user vehicles folder; path-escape hardened)
-
+**Alternate timing modes** — `start_lap`/`lap_status`/`stop_lap` (manual),
+`start_time_trial`/`time_trial_status`/`stop_time_trial` (countdown)
+**Deep telemetry** — `wheel_telemetry`, `car_mass`, `outgauge_telemetry`,
+`vehicle_lua` (raw Lua introspection)
+**Drive logging** — `start_logging`, `stop_logging`, `summarize_drive`
+**Parts & configs** — `get_config`, `set_config`, `set_tuning`, `list_parts`,
+`swap_parts`, `set_traction_control` (live A/B), `list_vehicle_models`,
+`list_configs`, `read_pc`, `write_pc` (confined to the user vehicles folder;
+path-escape hardened)
 **ACTIVE mode** (only when you explicitly ask) — `spawn`, `set_control`,
 `run_test`
 
+The guided prompts reference only core tools, so they work on both surfaces
+(there's a test pinning that). `doctor` reports which surface is active.
 Every tool returns `{"ok": bool, ...}` and never raises across the MCP
 boundary — failures come back as a clear message plus the usual fix.
 
@@ -200,7 +213,7 @@ Run `doctor` first — it automates most of this table.
 ## Development
 
 ```bat
-.venv\Scripts\python.exe -m pytest -q     & REM 149 tests, offline, ~7 s
+.venv\Scripts\python.exe -m pytest -q     & REM 151 tests, offline, ~7 s
 .venv\Scripts\python.exe -m ruff check src tests
 .venv\Scripts\python.exe -m mypy
 ```

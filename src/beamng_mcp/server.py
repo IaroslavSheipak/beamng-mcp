@@ -45,15 +45,33 @@ def _call(fn: Callable[..., object], *args: object, **kwargs: object) -> dict:
     return ok(**(result if isinstance(result, dict) else {"result": result}))
 
 
-def create_server(app: App = APP) -> FastMCP:
+def create_server(app: App = APP, full: bool | None = None) -> FastMCP:
     """Build a FastMCP server bound to ``app`` (pass a fresh ``App()`` in tests
-    to avoid sharing the process-wide singleton)."""
+    to avoid sharing the process-wide singleton).
+
+    Two tool surfaces. ``@core()`` (the default) is the minimal set that covers
+    the whole engineer loop with no dead ends: diagnose -> connect -> time laps
+    -> analyze/coach -> feel -> plan -> apply -> compare -> save. ``@power()``
+    tools (everything else: ACTIVE mode, .pc files, raw Lua, part swapping,
+    drive logging, alternate timing modes) register only when ``full`` is true
+    — default from ``BEAMNG_FULL_SURFACE=1``. All prompts are always
+    registered and reference only core tools.
+    """
+    if full is None:
+        full = app.settings.full_surface
     mcp = FastMCP("beamng-mcp")
     sim = app.sim
     timer = app.timer
 
+    core = mcp.tool  # always registered
+
+    def power() -> Callable:
+        """Register only on the full surface; otherwise leave the function
+        unregistered (it stays a plain closure, invisible to the client)."""
+        return mcp.tool() if full else (lambda fn: fn)
+
     # === connection lifecycle ================================================
-    @mcp.tool()
+    @core()
     def connect(home: str | None = None, user: str | None = None,
                 host: str | None = None, port: int | None = None,
                 launch: bool = False) -> dict:
@@ -68,24 +86,24 @@ def create_server(app: App = APP) -> FastMCP:
         """
         return _call(app.connect, home=home, user=user, host=host, port=port, launch=launch)
 
-    @mcp.tool()
+    @core()
     def disconnect() -> dict:
         """Close the BeamNGpy session and clear all session state."""
         return _call(app.disconnect)
 
-    @mcp.tool()
+    @core()
     def reconnect() -> dict:
         """Cleanly close and reopen the attach connection — recovers a stale GE
         session (e.g. after the game was restarted). Does NOT clear a game-side
         per-vehicle socket wedge; that needs a BeamNG.drive restart."""
         return _call(app.reconnect)
 
-    @mcp.tool()
+    @core()
     def status() -> dict:
         """Report connection state, active scenario, spawned vehicles, config."""
         return _call(sim.status)
 
-    @mcp.tool()
+    @core()
     def doctor() -> dict:
         """Health-check EVERYTHING (run this first when anything misbehaves, or
         for first-time setup): game install + user folder paths, whether the
@@ -105,24 +123,24 @@ def create_server(app: App = APP) -> FastMCP:
 
         return _call(_doctor)
 
-    @mcp.tool()
+    @core()
     def current_vehicles() -> dict:
         """List the vehicles already in the running game, flagging the car the
         user is driving. Read-only; spawns nothing."""
         return _call(vehicle.current_vehicles, sim)
 
-    @mcp.tool()
+    @power()
     def list_vehicle_models() -> dict:
         """List drivable models from install content/vehicles + user vehicles."""
         return _call(pc_config.list_vehicle_models)
 
-    @mcp.tool()
+    @power()
     def list_configs(model: str | None = None) -> dict:
         """List available .pc configs in the user vehicles folder."""
         return _call(lambda: {"configs": pc_config.list_pc(model)})
 
     # === active mode: spawn / drive ==========================================
-    @mcp.tool()
+    @power()
     def spawn(model: str, config: str | None = None, vid: str = "ego",
               pos: list[float] | None = None, rot_quat: list[float] | None = None,
               level: str = "gridmap_v2") -> dict:
@@ -138,7 +156,7 @@ def create_server(app: App = APP) -> FastMCP:
             level=level,
         )
 
-    @mcp.tool()
+    @core()
     def telemetry(vid: str | None = None) -> dict:
         """Poll live telemetry of the car you're CURRENTLY driving (vid=None):
         Electrics channels (rpm, wheelspeed, gear, throttle, brake, fuel,
@@ -146,14 +164,14 @@ def create_server(app: App = APP) -> FastMCP:
         and State kinematics."""
         return _call(telemetry_svc.telemetry, sim, vid=vid)
 
-    @mcp.tool()
+    @power()
     def get_config(vid: str | None = None) -> dict:
         """Return the part-config (installed parts + saved tuning vars) of the
         car you're CURRENTLY driving (vid=None). For the FULL tunable surface
         (every $var, not just the saved subset) use get_tuning_full."""
         return _call(tuning.get_tuning, sim, vid=vid)
 
-    @mcp.tool()
+    @power()
     def set_config(cfg: dict, vid: str | None = None) -> dict:
         """Apply a part-config to the car you're CURRENTLY driving (vid=None):
         pass a full or partial part-config tree (as from get_config).
@@ -162,7 +180,7 @@ def create_server(app: App = APP) -> FastMCP:
         repairs it and resets damage — exactly like the in-game parts menu)."""
         return _call(tuning.set_tuning, sim, cfg, vid=vid)
 
-    @mcp.tool()
+    @power()
     def set_control(vid: str | None = None, steering: float | None = None,
                      throttle: float | None = None, brake: float | None = None,
                      parkingbrake: float | None = None, clutch: float | None = None,
@@ -175,7 +193,7 @@ def create_server(app: App = APP) -> FastMCP:
             brake=brake, parkingbrake=parkingbrake, clutch=clutch, gear=gear,
         )
 
-    @mcp.tool()
+    @power()
     def run_test(vid: str = "ego", model: str = "etk800",
                  level: str = "west_coast_usa", ai_mode: str = "span",
                  speed_kmh: float = 60.0, duration_s: float = 10.0,
@@ -189,18 +207,18 @@ def create_server(app: App = APP) -> FastMCP:
         )
 
     # === .pc configs (offline) ===============================================
-    @mcp.tool()
+    @power()
     def read_pc(model: str, name: str) -> dict:
         """Read a .pc config JSON from the user folder (confined)."""
         return _call(pc_config.read_pc, model, name)
 
-    @mcp.tool()
+    @power()
     def write_pc(model: str, name: str, data: dict) -> dict:
         """Write/overwrite a .pc config JSON into the user folder (confined)."""
         return _call(pc_config.write_pc, model, name, data)
 
     # === OutGauge / plain drive logging =======================================
-    @mcp.tool()
+    @power()
     def outgauge_telemetry(ip: str = "127.0.0.1", port: int = 4444,
                             timeout: float = 2.0) -> dict:
         """Read ONE OutGauge UDP packet (license-free, no BeamNGpy). Requires
@@ -216,20 +234,20 @@ def create_server(app: App = APP) -> FastMCP:
 
         return _call(_read)
 
-    @mcp.tool()
+    @power()
     def start_logging() -> dict:
         """Start recording OutGauge telemetry to a CSV (background thread).
         Enable OutGauge in-game first (Options > Other > Protocols,
         127.0.0.1:4444). Robust — does NOT use the per-vehicle socket."""
         return _call(app.drivelog.start)
 
-    @mcp.tool()
+    @power()
     def stop_logging() -> dict:
         """Stop the active drive recording and return a summary of the run
         (duration, distance, top/avg speed, 0-100, throttle/brake %, gears)."""
         return _call(app.drivelog.stop)
 
-    @mcp.tool()
+    @power()
     def summarize_drive(path: str | None = None) -> dict:
         """Summarize a recorded drive CSV (defaults to the most recent)."""
 
@@ -241,7 +259,7 @@ def create_server(app: App = APP) -> FastMCP:
 
         return _call(_summarize)
 
-    @mcp.tool()
+    @power()
     def vehicle_lua(code: str, vid: str | None = None) -> dict:
         """ADVANCED: run a Lua chunk on the current vehicle and return its value
         (end with `return <expr>`). The deep-introspection hook for analysis —
@@ -250,26 +268,26 @@ def create_server(app: App = APP) -> FastMCP:
         return _call(lua.vehicle_lua, sim, code, vid=vid)
 
     # === AI race engineer =====================================================
-    @mcp.tool()
+    @power()
     def start_lap(hz: float = 30.0) -> dict:
         """Begin recording a RICH telemetry lap of the car you're driving:
         speed, lateral/longitudinal/vertical G, yaw heading, steering,
         throttle/brake. Drive your lap, then call stop_lap."""
         return _call(timer.start_lap, hz=hz)
 
-    @mcp.tool()
+    @power()
     def stop_lap() -> dict:
         """Stop the rich lap recording and auto-analyze it into a car-behavior
         report (grip, balance, braking, ride, symptoms)."""
         return _call(timer.stop_lap)
 
-    @mcp.tool()
+    @power()
     def lap_status() -> dict:
         """Poll the manual lap recording: is it running, samples so far,
         elapsed time, the CSV path."""
         return _call(timer.lap_status)
 
-    @mcp.tool()
+    @core()
     def analyze_lap(path: str | None = None) -> dict:
         """Analyze a recorded rich lap (default: most recent) into engineer
         metrics: grip envelope, balance/slip angle, braking, ride, symptoms.
@@ -283,7 +301,7 @@ def create_server(app: App = APP) -> FastMCP:
 
         return _call(_analyze)
 
-    @mcp.tool()
+    @core()
     def compare_laps(path_a: str | None = None, path_b: str | None = None) -> dict:
         """Compare two recorded laps — the 'did that setup change actually
         help?' tool. Defaults to the two most recent laps (older = baseline,
@@ -311,7 +329,7 @@ def create_server(app: App = APP) -> FastMCP:
 
         return _call(_compare)
 
-    @mcp.tool()
+    @core()
     def lap_coach(path: str | None = None) -> dict:
         """DRIVING coach (the driver-side twin of race_engineer): reads a
         recorded lap (default: most recent) and returns technique tips —
@@ -336,7 +354,7 @@ def create_server(app: App = APP) -> FastMCP:
 
         return _call(_coach)
 
-    @mcp.tool()
+    @core()
     def race_engineer(feedback: str, lap_path: str | None = None,
                        analyze: bool = True) -> dict:
         """THE race engineer. Tell it how the car FELT in plain language
@@ -348,21 +366,21 @@ def create_server(app: App = APP) -> FastMCP:
         telemetry and goes on feel alone."""
         return _call(app.race_engineer, feedback, lap_path=lap_path, analyze=analyze)
 
-    @mcp.tool()
+    @core()
     def get_tuning_full() -> dict:
         """Read the car's FULL tunable surface from the vehicle VM (every $var
         with live value + default + min + max + unit + title + category) — far
         richer than get_config's saved-vars subset."""
         return _call(tuning.get_tuning_full, sim)
 
-    @mcp.tool()
+    @power()
     def set_tuning(vars: dict) -> dict:
         """Apply tuning $vars to the current car, e.g. {"$arb_spring_F": 39600}.
         Values are clamped to the car's live min/max. Applying RESPAWNS the
         car. Use between runs, then re-drive to confirm."""
         return _call(tuning.set_tuning_vars, sim, vars)
 
-    @mcp.tool()
+    @core()
     def apply_setup(plan: list | None = None, vars: dict | None = None,
                      save_as: str | None = None) -> dict:
         """Apply a race_engineer plan (pass its diagnosis["plan"]) or an
@@ -370,98 +388,98 @@ def create_server(app: App = APP) -> FastMCP:
         via save_as. Respawns the car."""
         return _call(app.apply_setup, plan=plan, vars=vars, save_as=save_as)
 
-    @mcp.tool()
+    @core()
     def set_tire_pressure(psi_f: float | None = None, psi_r: float | None = None) -> dict:
         """Set front/rear tire pressure (psi) LIVE — no respawn."""
         return _call(tuning.set_tire_pressure, sim, psi_f=psi_f, psi_r=psi_r)
 
-    @mcp.tool()
+    @power()
     def wheel_telemetry() -> dict:
         """Per-wheel data via Lua: name, wheelSpeed, angularVelocity, brake
         surface temperature — for lockup / brake-bias / thermal inference."""
         return _call(tuning.wheel_telemetry, sim)
 
     # === in-game time trial / auto-lap session ================================
-    @mcp.tool()
+    @core()
     def set_start_line() -> dict:
         """Mark the car's CURRENT position as the start/finish line and draw a
         green gate across the track."""
         return _call(timer.set_start_line)
 
-    @mcp.tool()
+    @power()
     def start_time_trial(countdown: int = 3, hz: float = 30.0) -> dict:
         """Start an in-game timed lap: 3-2-1-GO countdown, records a rich
         telemetry lap, AUTO-FINISHES on crossing the line again. Non-blocking
         — poll time_trial_status."""
         return _call(timer.start_time_trial, countdown=countdown, hz=hz)
 
-    @mcp.tool()
+    @power()
     def time_trial_status() -> dict:
         """Poll the time trial: state, live elapsed time, and once finished the
         lap time + summary."""
         return _call(timer.time_trial_status)
 
-    @mcp.tool()
+    @power()
     def stop_time_trial() -> dict:
         """Finish the current timed lap NOW (manual finish/abort)."""
         return _call(timer.stop_time_trial)
 
-    @mcp.tool()
+    @core()
     def start_lap_session(hz: float = 30.0) -> dict:
         """Begin a HANDS-OFF lap session: set a start/finish line, then just
         DRIVE — every crossing auto-times a lap. Poll lap_session_status."""
         return _call(timer.start_lap_session, hz=hz)
 
-    @mcp.tool()
+    @core()
     def lap_session_status() -> dict:
         """List the auto-timed laps this session, the best, current elapsed."""
         return _call(timer.lap_session_status)
 
-    @mcp.tool()
+    @core()
     def last_lap() -> dict:
         """The most recent auto-timed lap: lap time + the full telemetry
         report (grip, balance, braking, ride, symptoms)."""
         return _call(timer.last_lap)
 
-    @mcp.tool()
+    @core()
     def stop_lap_session() -> dict:
         """End the auto-lap session and return the final list of lap times."""
         return _call(timer.stop_lap_session)
 
-    @mcp.tool()
+    @power()
     def set_traction_control(on: bool) -> dict:
         """Toggle traction control LIVE (no respawn) via the drivingDynamics
         CMU — for an on/off A/B."""
         return _call(tuning.set_traction_control, sim, on)
 
     # === fitment-aware part editing ===========================================
-    @mcp.tool()
+    @power()
     def list_parts(filter: str | None = None) -> dict:
         """List the car's part slots from the live part TREE. With a `filter`
         it also lists that slot's VALID options (suitablePartNames)."""
         return _call(tuning.list_parts, sim, filter=filter)
 
-    @mcp.tool()
+    @power()
     def swap_parts(changes: dict) -> dict:
         """Fitment-safe part swap. `changes` = {"slot_id": "part_name"} ("" to
         empty a slot). Validated against suitablePartNames; iterates the
         respawn cascade until it settles."""
         return _call(tuning.swap_parts, sim, changes)
 
-    @mcp.tool()
+    @core()
     def save_config(name: str) -> dict:
         """Save the car's CURRENT parts + tuning vars as a .pc build (confined
         to the user vehicles folder) so it persists and loads from the in-game
         config menu."""
         return _call(tuning.save_config, sim, name)
 
-    @mcp.tool()
+    @power()
     def car_mass(without_wheels: bool = False) -> dict:
         """Read the car's ACTUAL mass in kg + center of gravity from the
         physics core. `without_wheels` excludes unsprung wheel mass."""
         return _call(tuning.car_mass, sim, without_wheels=without_wheels)
 
-    @mcp.tool()
+    @core()
     def clear_gates() -> dict:
         """Wipe ALL start/finish gates + the live timer text from the world."""
         return _call(timer.clear_gates)

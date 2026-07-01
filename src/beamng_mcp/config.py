@@ -28,6 +28,10 @@ class Settings:
     port: int
     #: Where drive/lap CSVs are written (RichLapRecorder + DriveLogger share it).
     logs_dir: str
+    #: False (default) = the ~21-tool core surface (the whole engineer loop);
+    #: True (BEAMNG_FULL_SURFACE=1) = all tools incl. ACTIVE mode / .pc files /
+    #: raw Lua / part swapping / alternate timing modes.
+    full_surface: bool = False
 
     @property
     def user_vehicles(self) -> str:
@@ -51,7 +55,9 @@ class Settings:
         host = os.environ.get("BEAMNG_HOST", DEFAULT_HOST)
         port = int(os.environ.get("BEAMNG_PORT", str(DEFAULT_PORT)))
         logs_dir = os.environ.get("BEAMNG_LOGS_DIR", os.path.join(os.getcwd(), "logs"))
-        return cls(game_home, user_folder, userpath_root, host, port, logs_dir)
+        full_raw = os.environ.get("BEAMNG_FULL_SURFACE", "")
+        full = full_raw.strip().lower() in ("1", "true", "yes", "on")
+        return cls(game_home, user_folder, userpath_root, host, port, logs_dir, full)
 
 
 #: Process-wide settings, resolved from the environment at import time.
