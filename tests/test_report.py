@@ -44,3 +44,12 @@ def test_stopped_lap_is_flagged_invalid():
 
 def test_empty_lap():
     assert report.analyze_rows([])["ok"] is False
+
+
+def test_impact_spike_does_not_pollute_braking():
+    # Live: a wall hit read as 13.7 g of "peak braking". Braking now runs on
+    # the impact-cleaned series, same protection grip already had.
+    lap = _lap()
+    lap.insert(50, sample_from_row({"t": 5.05, "dist": 415.0, "speed": 16.6, "gx": -14.0}))
+    r = report.analyze_samples(lap)
+    assert r["braking"]["peak_decel_g"] < 3.0

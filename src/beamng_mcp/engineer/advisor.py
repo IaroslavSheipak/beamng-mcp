@@ -161,8 +161,17 @@ def _merge_complaints(feedback: str, report: dict | None) -> list[dict]:
             key = (ph, sym)
             if key in index:
                 c = index[key]
-                c["source"] = "both"
-                c["confidence"] = _boost(c["confidence"], conf)
+                if c["source"] in ("driver", "both"):
+                    # driver + telemetry agreement — the real confidence boost
+                    c["source"] = "both"
+                    c["confidence"] = _boost(c["confidence"], conf)
+                else:
+                    # telemetry + telemetry (e.g. balance index AND slip angle
+                    # both reading oversteer): same sensor family agreeing —
+                    # keep the stronger confidence, do NOT claim source "both"
+                    # (seen live: an empty-feedback diagnosis showed "both").
+                    if CONF_RANK.get(conf, 1) > CONF_RANK.get(c["confidence"], 1):
+                        c["confidence"] = conf
                 c["evidence"] = ev or c["evidence"]
             else:
                 c = {"phase": ph, "symptom": sym, "source": "telemetry",

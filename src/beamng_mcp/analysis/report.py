@@ -51,7 +51,10 @@ def analyze_samples(samples: list[Sample]) -> dict:
     v = validity.assess(samples)
     clean = cleaning.detect_impacts(samples)
     cleaned = cleaning.clean_samples(samples, clean)
-    yaw = balance.yaw_rates(samples)
+    # Braking runs on the impact-CLEANED series (yaw recomputed to stay index-
+    # aligned): a wall hit read as 13.7 g of "peak braking" live — the same
+    # spike-poisoning grip was already protected against.
+    yaw_clean = balance.yaw_rates(cleaned)
     speeds = [s.speed_kmh for s in samples]
 
     report: dict = {
@@ -72,7 +75,7 @@ def analyze_samples(samples: list[Sample]) -> dict:
         "impacts_excluded": clean.n_impacts,
         "grip": grip.grip(cleaned),
         "balance": balance.balance(samples),
-        "braking": braking.braking(samples, yaw),
+        "braking": braking.braking(cleaned, yaw_clean),
         "ride": ride.ride(samples),
         "corners": corners.corners(samples),
     }

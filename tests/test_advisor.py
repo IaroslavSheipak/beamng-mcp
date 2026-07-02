@@ -98,3 +98,17 @@ def test_every_plan_item_moves_in_its_own_direction():
                 move = it["proposed"] - it["current"]
                 assert move != 0
                 assert (move > 0) == (it["dir"] == "+"), it
+
+
+def test_two_telemetry_signals_do_not_impersonate_the_driver():
+    # Live: an EMPTY-feedback diagnosis showed source "both" because two
+    # telemetry symptoms (balance index + slip) mapped to the same phase/symptom.
+    # "both" must mean driver + telemetry; telemetry x2 stays telemetry, unboosted.
+    rep = {"ok": True, "symptoms": [
+        {"type": "oversteer", "confidence": "medium", "evidence": "understeer_index"},
+        {"type": "sliding", "confidence": "medium", "evidence": "peak slip"},
+    ], "balance": {"tendency": "oversteer (loose)", "confidence": "medium"}}
+    d = advisor.diagnose("", rep, AVAIL)
+    assert d["ok"] and d["complaints"]
+    assert all(c["source"] == "telemetry" for c in d["complaints"])
+    assert all(c["confidence"] != "high" for c in d["complaints"])
