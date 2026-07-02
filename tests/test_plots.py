@@ -38,7 +38,7 @@ def test_delta_time_is_linear_for_uniform_speed_difference():
     b = _lap(dt=0.09)
     out = plots.delta_time(a, b)
     assert not out["warnings"]
-    d, delta = out["d"], out["delta"]
+    delta = out["delta"]
     assert delta[0] == 0.0
     total_a = 199 * 0.10
     assert abs(delta[-1] - (-0.1 * total_a)) < 0.05

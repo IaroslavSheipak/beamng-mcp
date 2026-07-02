@@ -44,7 +44,7 @@ def test_decimation_caps_points():
 def test_segments_are_continuous():
     lap = _lap(speeds=lambda i: 5.0 + (i % 40))
     segs = raceline.build_segments(lap, color_by="speed")
-    for (pts_a, _), (pts_b, _) in zip(segs, segs[1:]):
+    for (pts_a, _), (pts_b, _) in zip(segs, segs[1:], strict=False):
         assert pts_a[-1] == pts_b[0]  # each run starts where the last ended
 
 

@@ -21,11 +21,12 @@ from .analysis.report import analyze_lap
 from .config import SETTINGS, Settings
 from .engineer import advisor
 from .errors import BeamNGError
+from .optimizer.runner import SweepRunner
 from .pitwall import PitWallSession
 from .sim import drivelog, tuning
 from .sim.context import Simulator
-from .sim.raceline import RacingLineDrawer
 from .sim.motionsim import MotionSimListener
+from .sim.raceline import RacingLineDrawer
 from .timing.recorder import latest_lap
 from .timing.statemachine import LapTimer
 
@@ -41,6 +42,7 @@ class App:
         self.drivelog = drivelog.DriveLogger(settings.logs_dir)
         self.pitwall = PitWallSession(self)  # side-effect-free; registers its own hook
         self.raceline = RacingLineDrawer()
+        self.sweep = SweepRunner(self)       # side-effect-free; registers its own hook
         self.sim.add_disconnect_hook(self.motion.stop)
 
     # -- lifecycle (ties the MotionSim listener to the BeamNGpy connection) ---

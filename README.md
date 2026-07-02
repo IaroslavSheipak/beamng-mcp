@@ -137,7 +137,41 @@ at decision points ("apply it", "save it"), exactly where a deliberate
 respawn-warning belongs. `pit_session_status` carries the full data behind
 the last in-game read; `stop_pit_session` ends it with a summary.
 
-## Tools — a minimal core by default (24), the full surface on demand (50)
+## The debrief & the racing line (GT7-style)
+
+`plot_laps` renders the MoTeC trio as one PNG: **delta-T vs distance** (where
+the time is gained/lost — the single most useful chart in motorsport), the
+**track map** colored by speed with the slowest corners marked by apex speed,
+and the two-lap **speed overlay**. `draw_racing_line` draws a recorded lap
+directly INTO the game world: `color_by="speed"` shows braking zones red /
+fast sections blue (the GT7 convention), `color_by="delta"` paints where you
+are gaining (blue) or losing (red) time against a reference lap, from the
+local delta-T gradient — the "fix THIS corner" view. `clear_racing_line`
+removes it.
+
+## The overnight optimizer (Canopy-lite)
+
+Pro teams sweep setups in lap-time simulation because human lap-to-lap noise
+buries setup deltas. `start_setup_sweep` gets the same effect empirically:
+the game's AI drives your car as a **consistent robot driver**, a budgeted
+search (baseline → Latin hypercube → coordinate descent, one lever at a time)
+walks the car's real tuning sliders, and each config is scored by its median
+**valid** lap time on the line-crossing timer — crash laps never count.
+Park on the circuit where the lap should start, launch, walk away:
+
+- every result appends to a JSONL ledger live (a crash loses nothing),
+- two consecutive dead configs abort the night instead of burning it,
+- the best config is **re-applied at the end no matter what** (and optionally
+  saved as a `.pc` via `save_best_as`),
+- camber/toe are never auto-swept (their jbeam ranges can be reversed);
+  pin exact sliders with `vars=[...]` if you want a custom space.
+
+`sweep_status` shows the leaderboard and gain vs baseline; `stop_setup_sweep`
+aborts safely. Honest caveat: the robot is consistent, not fast — its optimum
+is a *relative* result; validate the final setup yourself (the pit board is
+right there).
+
+## Tools — a minimal core by default (30), the full surface on demand (56)
 
 By default the server exposes only the **core**: the complete engineer loop
 with no dead ends, and nothing else — less for the client model to wade
@@ -151,7 +185,10 @@ through, fewer ways to hold it wrong.
 **Core — lap timing** (the hands-off mode): `set_start_line`,
 `start_lap_session`, `lap_session_status`, `last_lap`, `stop_lap_session`,
 `clear_gates`
-**Core — analysis & coaching**: `analyze_lap`, `compare_laps`, `lap_coach`
+**Core — analysis & coaching**: `analyze_lap`, `compare_laps`, `lap_coach`,
+`plot_laps`, `draw_racing_line`, `clear_racing_line`
+**Core — overnight optimizer**: `start_setup_sweep`, `sweep_status`,
+`stop_setup_sweep`
 **Core — tune & prove**: `race_engineer`, `apply_setup` (takes a plan or a
 `{"$var": value}` map), `set_tire_pressure` (live, no respawn), `save_config`
 

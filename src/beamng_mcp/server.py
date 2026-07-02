@@ -505,6 +505,38 @@ def create_server(app: App = APP, full: bool | None = None) -> FastMCP:
         return _call(app.pitwall.stop)
 
     @core()
+    def start_setup_sweep(vars: list[str] | None = None, configs: int = 20,
+                          laps_per_config: int = 3, minutes: int = 120,
+                          speed_kmh: float = 110.0, aggression: float = 0.85,
+                          save_best_as: str | None = None) -> dict:
+        """THE OVERNIGHT OPTIMIZER (Canopy-lite): the game's AI drives your car
+        as a CONSISTENT robot while a budgeted search (baseline -> Latin
+        hypercube -> coordinate descent) walks the car's real tuning sliders,
+        scoring each config by its median VALID lap time on the line-crossing
+        timer. ACTIVE MODE for a long time — park ON the circuit where the lap
+        should start, then launch and walk away. Every result lands in a JSONL
+        ledger live; the best config is re-applied (and optionally saved as a
+        .pc) at the end no matter what. `vars` pins exact sliders; default
+        auto-picks springs/ARBs/diff/brake-bias and NEVER touches camber/toe
+        (untrustworthy ranges). Poll sweep_status; abort with stop_setup_sweep."""
+        return _call(app.sweep.start, vars=vars, configs=configs,
+                     laps_per_config=laps_per_config, minutes=minutes,
+                     speed_kmh=speed_kmh, aggression=aggression,
+                     save_best_as=save_best_as)
+
+    @core()
+    def sweep_status() -> dict:
+        """Sweep progress: eval counter, best config + lap time so far, gain vs
+        baseline, full history, ledger path."""
+        return _call(app.sweep.status)
+
+    @core()
+    def stop_setup_sweep() -> dict:
+        """Abort the sweep NOW; the best config found so far is still restored
+        and the ledger keeps everything already measured."""
+        return _call(app.sweep.stop)
+
+    @core()
     def start_lap_session(hz: float = 30.0) -> dict:
         """Begin a HANDS-OFF lap session: set a start/finish line, then just
         DRIVE — every crossing auto-times a lap. Poll lap_session_status.
@@ -611,7 +643,10 @@ def create_server(app: App = APP, full: bool | None = None) -> FastMCP:
             "candidate). Report the verdict honestly — a change that didn't help gets "
             "rolled back, not defended.\n"
             "8. When they're happy: save_config(name) so the build persists in the in-game "
-            "config menu. lap_coach() at the end if they want driver-side homework.\n"
+            "config menu. lap_coach() at the end if they want driver-side homework; "
+            "plot_laps() for the visual debrief (delta-T + track map), draw_racing_line() "
+            "to paint it into the world. If they're done driving for the day, offer "
+            "start_setup_sweep() — the overnight robot optimizer.\n"
             "If anything misbehaves (connection, telemetry, spawns): doctor() first."
         )
 

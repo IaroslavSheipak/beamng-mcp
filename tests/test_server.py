@@ -15,6 +15,7 @@ CORE_TOOLS = {
     "current_vehicles", "telemetry",
     "set_start_line", "clear_gates",
     "start_pit_session", "pit_session_status", "stop_pit_session",
+    "start_setup_sweep", "sweep_status", "stop_setup_sweep",
     "start_lap_session", "lap_session_status", "last_lap", "stop_lap_session",
     "analyze_lap", "compare_laps", "lap_coach",
     "plot_laps", "draw_racing_line", "clear_racing_line",
