@@ -126,7 +126,18 @@ bias, differential, tire pressure — whatever the installed parts actually
 expose. `list_parts`/`swap_parts` handle fitment-aware part changes (e.g. the
 etk800 needs Rally/Race coilovers before spring/damper sliders exist).
 
-## Tools — a minimal core by default (21), the full surface on demand (47)
+## The in-game pit board (no alt-tab)
+
+A chat window is the wrong cockpit for a live driving loop — so the session
+runs **inside the game**. One call to `start_pit_session` sets the
+start/finish line at your car and puts Mara on the wall: every flying lap
+self-times, and the verdict appears as in-game toasts — lap time, validity,
+balance read, and Mara's top setup call. You just drive. Chat is only needed
+at decision points ("apply it", "save it"), exactly where a deliberate
+respawn-warning belongs. `pit_session_status` carries the full data behind
+the last in-game read; `stop_pit_session` ends it with a summary.
+
+## Tools — a minimal core by default (24), the full surface on demand (50)
 
 By default the server exposes only the **core**: the complete engineer loop
 with no dead ends, and nothing else — less for the client model to wade
@@ -135,6 +146,8 @@ through, fewer ways to hold it wrong.
 **Core — connection & health**: `doctor`, `connect`, `disconnect`,
 `reconnect`, `status`
 **Core — your car**: `current_vehicles`, `telemetry`, `get_tuning_full`
+**Core — the pit board**: `start_pit_session`, `pit_session_status`,
+`stop_pit_session`
 **Core — lap timing** (the hands-off mode): `set_start_line`,
 `start_lap_session`, `lap_session_status`, `last_lap`, `stop_lap_session`,
 `clear_gates`
@@ -213,7 +226,7 @@ Run `doctor` first — it automates most of this table.
 ## Development
 
 ```bat
-.venv\Scripts\python.exe -m pytest -q     & REM 151 tests, offline, ~7 s
+.venv\Scripts\python.exe -m pytest -q     & REM 162 tests, offline, ~7 s
 .venv\Scripts\python.exe -m ruff check src tests
 .venv\Scripts\python.exe -m mypy
 ```

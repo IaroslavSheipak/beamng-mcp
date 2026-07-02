@@ -425,9 +425,31 @@ def create_server(app: App = APP, full: bool | None = None) -> FastMCP:
         return _call(timer.stop_time_trial)
 
     @core()
+    def start_pit_session(hz: float = 30.0) -> dict:
+        """THE way to run a session: start the in-game PIT BOARD. Sets the
+        start/finish line at the car's position, then the driver JUST DRIVES —
+        every flying lap self-times, and after each lap the verdict appears
+        IN-GAME as toasts (lap time, validity, balance read, Mara's top setup
+        call). No chat round-trips while driving; come back to chat only to
+        apply a change or save the build. Stop with stop_pit_session."""
+        return _call(app.pitwall.start, hz=hz)
+
+    @core()
+    def pit_session_status() -> dict:
+        """Pit-board session state: laps timed so far, best, and the full data
+        behind the last in-game read (for when the driver comes back to chat)."""
+        return _call(app.pitwall.status)
+
+    @core()
+    def stop_pit_session() -> dict:
+        """End the pit-board session: final lap list + best + the last read."""
+        return _call(app.pitwall.stop)
+
+    @core()
     def start_lap_session(hz: float = 30.0) -> dict:
         """Begin a HANDS-OFF lap session: set a start/finish line, then just
-        DRIVE — every crossing auto-times a lap. Poll lap_session_status."""
+        DRIVE — every crossing auto-times a lap. Poll lap_session_status.
+        (Prefer start_pit_session, which adds the in-game pit board on top.)"""
         return _call(timer.start_lap_session, hz=hz)
 
     @core()
@@ -512,12 +534,15 @@ def create_server(app: App = APP, full: bool | None = None) -> FastMCP:
             "and which sliders it actually exposes (never promise a lever it lacks).\n"
             "2. Ask where they're driving and what the goal is (lap time / fix the balance / "
             "build a setup).\n"
-            "3. Have them drive to where the lap should start, then set_start_line() and "
-            "start_lap_session() — they just drive; every flying lap times itself. Poll "
-            "lap_session_status() when they ask.\n"
-            "4. After 2-3 laps: last_lap() for the time + telemetry report. Give the one-line "
-            "read (balance tendency, where the grip is). If the report says the lap is "
-            "invalid, say so and ask for a clean one — never coach off a crash lap.\n"
+            "3. Have them drive to where the lap should start, then start_pit_session() — "
+            "the start/finish line is set at the car, every flying lap self-times, and the "
+            "verdict (time, validity, balance read, Mara's call) appears IN-GAME as toasts. "
+            "Tell them: 'just drive — everything shows on your screen; come back here only "
+            "to apply a change'. Poll pit_session_status() when they return.\n"
+            "4. After 2-3 laps: last_lap() (or pit_session_status().last_read) for the time + "
+            "telemetry report. Give the one-line read (balance tendency, where the grip is). "
+            "If the report says the lap is invalid, say so and ask for a clean one — never "
+            "coach off a crash lap.\n"
             "5. Ask how the car FELT (entry/mid/exit, brakes, kerbs) and pass their words "
             "verbatim to race_engineer(feedback). Present the ranked plan with its "
             "confidence labels and caveats.\n"

@@ -21,6 +21,7 @@ from .analysis.report import analyze_lap
 from .config import SETTINGS, Settings
 from .engineer import advisor
 from .errors import BeamNGError
+from .pitwall import PitWallSession
 from .sim import drivelog, tuning
 from .sim.context import Simulator
 from .sim.motionsim import MotionSimListener
@@ -37,6 +38,7 @@ class App:
         self.motion = MotionSimListener()
         self.timer = LapTimer(self.sim, settings.logs_dir, analyze=analyze_lap, motion=self.motion)
         self.drivelog = drivelog.DriveLogger(settings.logs_dir)
+        self.pitwall = PitWallSession(self)  # side-effect-free; registers its own hook
         self.sim.add_disconnect_hook(self.motion.stop)
 
     # -- lifecycle (ties the MotionSim listener to the BeamNGpy connection) ---
