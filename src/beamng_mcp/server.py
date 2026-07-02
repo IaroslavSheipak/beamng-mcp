@@ -21,12 +21,13 @@ from mcp.server.fastmcp import FastMCP
 
 from .analysis import coach as coach_mod
 from .analysis import compare as compare_mod
+from .analysis import plots as plots_mod
 from .analysis.ingest import load_lap
 from .analysis.report import analyze_lap as analyze_lap_file
 from .app import APP, App
 from .errors import BeamNGError, from_exc, ok
 from .sim import doctor as doctor_mod
-from .sim import drivelog, lua, outgauge, pc_config, scenario, tuning, vehicle
+from .sim import drivelog, lua, outgauge, pc_config, raceline, scenario, tuning, vehicle
 from .sim import telemetry as telemetry_svc
 from .timing.recorder import latest_lap as latest_rich_lap
 from .timing.recorder import recent_laps
@@ -328,6 +329,64 @@ def create_server(app: App = APP, full: bool | None = None) -> FastMCP:
             return compare_mod.compare_lap_files(a, b)
 
         return _call(_compare)
+
+    @core()
+    def plot_laps(path_a: str | None = None, path_b: str | None = None) -> dict:
+        """Render the MoTeC-style lap DEBRIEF as one PNG: delta-T vs distance
+        (where the time is gained/lost — THE motorsport chart), the track map
+        colored by speed with numbered corners, and the two-lap speed overlay.
+        Defaults to the two most recent laps (older = baseline); with one path
+        given, renders a single-lap debrief (map + speed + throttle/brake).
+        Returns the PNG path. Pure analysis; no game needed."""
+
+        def _plot() -> dict:
+            a, b_, err = plots_mod.latest_debrief_paths(
+                app.settings.logs_dir, path_a, path_b)
+            if err:
+                raise BeamNGError(err)
+            assert a is not None
+            return plots_mod.render_debrief(a, b_)
+
+        return _call(_plot)
+
+    @core()
+    def draw_racing_line(path: str | None = None, color_by: str = "speed",
+                         ref_path: str | None = None) -> dict:
+        """Draw a recorded lap's driven line INTO the game world (GT7-style),
+        colored blue<->red: color_by='speed' (RED = slow/braking zones, blue
+        = fast — the GT7 convention) or color_by='delta' (needs a reference
+        lap: blue where gaining time on it, red where losing — the 'fix THIS
+        corner' view). Defaults: latest lap; for 'delta' the reference
+        defaults to the lap before it. Remove with clear_racing_line."""
+
+        def _draw() -> dict:
+            lap_path = path or latest_rich_lap(app.settings.logs_dir)
+            if not lap_path:
+                raise BeamNGError(f"no recorded laps found in {app.settings.logs_dir}")
+            samples = load_lap(lap_path)
+            ref = None
+            ref_p = ref_path
+            if color_by == "delta" and ref_p is None:
+                laps = recent_laps(app.settings.logs_dir, 2)
+                ref_p = laps[0] if len(laps) == 2 and laps[1] == lap_path else None
+                if not ref_p:
+                    raise BeamNGError("color_by='delta' needs a reference lap "
+                                      "(pass ref_path)")
+            if ref_p:
+                ref = load_lap(ref_p)
+                if not ref:
+                    raise BeamNGError(f"no usable samples in reference {ref_p}")
+            segments = raceline.build_segments(samples, color_by=color_by, ref=ref)
+            out = app.raceline.draw(sim, segments)
+            out.update({"lap": lap_path, "color_by": color_by, "ref": ref_p})
+            return out
+
+        return _call(_draw)
+
+    @core()
+    def clear_racing_line() -> dict:
+        """Remove the drawn racing line from the world."""
+        return _call(app.raceline.clear, sim)
 
     @core()
     def lap_coach(path: str | None = None) -> dict:

@@ -17,6 +17,7 @@ CORE_TOOLS = {
     "start_pit_session", "pit_session_status", "stop_pit_session",
     "start_lap_session", "lap_session_status", "last_lap", "stop_lap_session",
     "analyze_lap", "compare_laps", "lap_coach",
+    "plot_laps", "draw_racing_line", "clear_racing_line",
     "race_engineer", "get_tuning_full", "apply_setup", "set_tire_pressure",
     "save_config",
 }
@@ -48,7 +49,7 @@ def test_full_surface_is_core_plus_power():
     _, mcp = _server(full=True)
     names = {t.name for t in mcp._tool_manager.list_tools()}
     assert names == CORE_TOOLS | POWER_TOOLS
-    assert len(names) == 50
+    assert len(names) == len(CORE_TOOLS) + len(POWER_TOOLS)
 
 
 def test_prompts_registered_on_both_surfaces():

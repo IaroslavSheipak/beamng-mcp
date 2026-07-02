@@ -24,6 +24,7 @@ from .errors import BeamNGError
 from .pitwall import PitWallSession
 from .sim import drivelog, tuning
 from .sim.context import Simulator
+from .sim.raceline import RacingLineDrawer
 from .sim.motionsim import MotionSimListener
 from .timing.recorder import latest_lap
 from .timing.statemachine import LapTimer
@@ -39,6 +40,7 @@ class App:
         self.timer = LapTimer(self.sim, settings.logs_dir, analyze=analyze_lap, motion=self.motion)
         self.drivelog = drivelog.DriveLogger(settings.logs_dir)
         self.pitwall = PitWallSession(self)  # side-effect-free; registers its own hook
+        self.raceline = RacingLineDrawer()
         self.sim.add_disconnect_hook(self.motion.stop)
 
     # -- lifecycle (ties the MotionSim listener to the BeamNGpy connection) ---
