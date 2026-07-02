@@ -79,19 +79,35 @@ class App:
         live_report = report if (report and report.get("ok")) else None
 
         diag = advisor.diagnose(feedback or "", live_report, available)
+        kept: list = []
         for it in diag.get("plan", []):
             meta = full["vars"].get(it.get("var"))
             if not meta:
+                kept.append(it)
                 continue
             try:
                 lo, hi = float(meta["min"]), float(meta["max"])
                 lo, hi = min(lo, hi), max(lo, hi)
                 if it.get("proposed") is not None:
-                    it["proposed"] = max(lo, min(hi, it["proposed"]))
+                    clamped = max(lo, min(hi, it["proposed"]))
+                    # The live-range clamp must not REVERSE the move (a current
+                    # value outside the car's slider range would do that) — an
+                    # item moving against its own rationale is dropped, same
+                    # guard as the spec-range clamp in advisor._diagnose.
+                    move = clamped - float(it["current"])
+                    if move == 0 or (move > 0) != (it.get("dir") == "+"):
+                        diag.setdefault("caveats", []).append(
+                            f"{it.get('var')}: current {it['current']:g} is outside the "
+                            f"car's live range [{lo:g}, {hi:g}], so a '{it.get('dir')}' "
+                            "move has no headroom — dropped from the plan.")
+                        continue
+                    it["proposed"] = clamped
                 it["unit"] = meta.get("unit")
                 it["title"] = meta.get("title")
             except (TypeError, ValueError, KeyError):
                 pass
+            kept.append(it)
+        diag["plan"] = kept
 
         brief = advisor.format_report(live_report, diag)
         return {"engineer": advisor.ENGINEER, "brief": brief, "diagnosis": diag,

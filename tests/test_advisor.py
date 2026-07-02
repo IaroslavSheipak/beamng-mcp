@@ -70,3 +70,31 @@ def test_format_report_renders_brief():
 
 def test_never_raises_on_junk():
     assert advisor.diagnose("", None, None)["ok"] in (True, False)
+
+
+def test_no_headroom_item_is_dropped_not_reversed():
+    """The live P2 bug: front ARB at 175000 with spec clamp hi 100000 turned
+    'stiffen +12%' into a -43% SOFTENING. Such an item must be dropped with a
+    caveat, never emitted moving against its own rationale."""
+    avail = {"$arb_spring_F": 175000.0, "$arb_spring_R": 30000.0}
+    d = advisor.diagnose("oversteer in corners", None, avail)
+    assert d["ok"]
+    vars_in_plan = {it["var"] for it in d["plan"]}
+    assert "$arb_spring_F" not in vars_in_plan          # dropped, not reversed
+    assert "$arb_spring_R" in vars_in_plan              # the in-range lever survives
+    rear = next(it for it in d["plan"] if it["var"] == "$arb_spring_R")
+    assert rear["dir"] == "-" and rear["proposed"] < 30000
+    assert any("no headroom" in c for c in d["caveats"])
+
+
+def test_every_plan_item_moves_in_its_own_direction():
+    for feedback in ("understeer on entry", "oversteer in corners",
+                     "unstable under braking", "bottoming over kerbs"):
+        for cur_f in (45000.0, 175000.0, 1000.0):
+            d = advisor.diagnose(feedback, None, {"$arb_spring_F": cur_f,
+                                                  "$arb_spring_R": 30000.0,
+                                                  "$brakebias": 0.68})
+            for it in d["plan"]:
+                move = it["proposed"] - it["current"]
+                assert move != 0
+                assert (move > 0) == (it["dir"] == "+"), it

@@ -274,6 +274,17 @@ def _diagnose(feedback: str, report: dict | None, available_vars: dict | None) -
         confidence = RANK_CONF[conf_rank]
 
         prop = _propose(rep["current"], spec, net_dir)
+        # A current value at/outside the spec's safe range makes the clamp
+        # REVERSE the intended move (seen live: front ARB 175000 with clamp hi
+        # 100000 turned "stiffen +12%" into a -43% softening). A plan item that
+        # moves opposite its own rationale is worse than no item — drop it.
+        move = float(prop["proposed"]) - rep["current"]
+        if move == 0 or (move > 0) != (net_dir == "+"):
+            caveats.append(
+                f"{_label(rep['lever'])} ({var}): current {rep['current']:g} is at/outside "
+                f"the safe range {spec['clamp']}, so a '{net_dir}' move has no headroom "
+                "— dropped from the plan.")
+            continue
         item = {
             "lever": rep["lever"], "var": var, "current": rep["current"],
             "proposed": prop["proposed"], "dir": net_dir,
