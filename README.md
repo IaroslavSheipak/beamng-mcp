@@ -92,7 +92,7 @@ spawns anything unless you explicitly use the ACTIVE-mode tools
 | `BEAMNG_HOME` | `C:\Program Files (x86)\Steam\steamapps\common\BeamNG.drive` | install dir (has `Bin64`) |
 | `BEAMNG_USER` | `C:\Users\Iaroslav\AppData\Local\BeamNG\BeamNG.drive\current` | active user profile (`.pc` configs live in `vehicles\`) |
 | `BEAMNG_HOST` / `BEAMNG_PORT` | `127.0.0.1` / `25252` | the tech socket |
-| `BEAMNG_LOGS_DIR` | `<cwd>\logs` | where lap/drive CSVs land |
+| `BEAMNG_LOGS_DIR` | `%LOCALAPPDATA%\beamng-mcp\logs` | where lap/drive CSVs land (stable, cwd-independent) |
 | `BEAMNG_FULL_SURFACE` | unset (core) | `1` exposes all 47 tools instead of the 21-tool core |
 
 ## The race-engineer loop

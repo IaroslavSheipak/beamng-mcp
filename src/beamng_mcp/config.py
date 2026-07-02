@@ -17,6 +17,15 @@ DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 25252
 
 
+def _default_logs_dir() -> str:
+    """A STABLE per-user location, independent of the server's cwd. The MCP
+    client spawns the server process from wherever the user happens to be, so
+    a cwd-relative default scatters lap CSVs across directories and breaks
+    'latest lap' / compare_laps history (found live)."""
+    base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+    return os.path.join(base, "beamng-mcp", "logs")
+
+
 @dataclass(frozen=True)
 class Settings:
     """Resolved, immutable runtime configuration."""
@@ -54,7 +63,7 @@ class Settings:
         userpath_root = os.environ.get("BEAMNG_USERPATH", os.path.dirname(user_folder))
         host = os.environ.get("BEAMNG_HOST", DEFAULT_HOST)
         port = int(os.environ.get("BEAMNG_PORT", str(DEFAULT_PORT)))
-        logs_dir = os.environ.get("BEAMNG_LOGS_DIR", os.path.join(os.getcwd(), "logs"))
+        logs_dir = os.environ.get("BEAMNG_LOGS_DIR", _default_logs_dir())
         full_raw = os.environ.get("BEAMNG_FULL_SURFACE", "")
         full = full_raw.strip().lower() in ("1", "true", "yes", "on")
         return cls(game_home, user_folder, userpath_root, host, port, logs_dir, full)
