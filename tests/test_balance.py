@@ -23,7 +23,8 @@ def test_slip_angle_zero_when_gripping():
 
 def test_slip_angle_detects_slide():
     # Travelling +x but pointing 10 deg off -> slip = -10 deg.
-    s = [mk(posx=0.0, posy=0.0, heading=math.radians(10)), mk(posx=1.0, posy=0.0, heading=math.radians(10))]
+    s = [mk(posx=0.0, posy=0.0, heading=math.radians(10)),
+         mk(posx=1.0, posy=0.0, heading=math.radians(10))]
     assert round(balance.slip_angles(s)[0], 1) == -10.0
 
 

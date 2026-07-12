@@ -303,7 +303,7 @@ def swap_parts(sim: Simulator, changes: dict, vid: str | None = None) -> dict:
             slotmap: dict = {}
             walk_part_tree(
                 cfg.get("partsTree"),
-                lambda n: slotmap.__setitem__(n["id"], n) if n.get("id") else None,
+                lambda n, m=slotmap: m.__setitem__(n["id"], n) if n.get("id") else None,
             )
             changed = False
             for sid, part in list(remaining.items()):

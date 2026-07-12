@@ -68,7 +68,7 @@ def listen_once(ip: str = "127.0.0.1", port: int = 4445, timeout: float = 2.0) -
         sock.settimeout(timeout)
         try:
             data, _addr = sock.recvfrom(256)
-        except socket.timeout:
+        except TimeoutError:
             return None
         return parse(data)
     finally:
@@ -127,7 +127,7 @@ class MotionSimListener:
                 try:
                     data, _addr = sock.recvfrom(256)
                     pkt = parse(data)
-                except socket.timeout:
+                except TimeoutError:
                     continue
                 except Exception as exc:  # noqa: BLE001 — bad packet; keep listening
                     self.error = repr(exc)

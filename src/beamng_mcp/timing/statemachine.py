@@ -51,7 +51,7 @@ _ORANGE = (1.0, 0.5, 0.1, 1.0)
 def fmt_time(s: float) -> str:
     """Format seconds as ``M:SS.mmm``."""
     m = int(s // 60)
-    return "%d:%06.3f" % (m, s - m * 60)
+    return f"{m}:{s - m * 60:06.3f}"
 
 
 def _num(x: object) -> object:

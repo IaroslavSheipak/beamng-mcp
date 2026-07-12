@@ -17,7 +17,8 @@ from .util import mean
 def _symptoms(report: dict) -> list[dict]:
     out: list[dict] = []
     b = report["balance"]
-    if b.get("understeer_index") is not None and b.get("tendency") not in (None, "neutral", "unknown"):
+    if (b.get("understeer_index") is not None
+            and b.get("tendency") not in (None, "neutral", "unknown")):
         out.append({
             "type": b["tendency"],
             "evidence": f"self-calibrated understeer_index {b['understeer_index']:+.2f}",
@@ -32,7 +33,10 @@ def _symptoms(report: dict) -> list[dict]:
     if report["braking"].get("unstable"):
         out.append({
             "type": "brake_instability",
-            "evidence": f"yaw {report['braking']['straightline_yaw_instability']:.2f} rad/s under straight braking",
+            "evidence": (
+                f"yaw {report['braking']['straightline_yaw_instability']:.2f} rad/s"
+                " under straight braking"
+            ),
             "confidence": "medium",
         })
     if report["ride"].get("bottoming_events", 0) > 5:

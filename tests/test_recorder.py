@@ -41,8 +41,8 @@ def test_records_monotone_time_and_distance(tmp_path):
     assert len(rows) >= 3
     ts = [r["t"] for r in rows if r.get("t") is not None]
     dists = [r["dist"] for r in rows if r.get("dist") is not None]
-    assert all(b > a for a, b in zip(ts, ts[1:]))       # time strictly increases
-    assert all(b > a for a, b in zip(dists, dists[1:]))  # distance integrates up
+    assert all(b > a for a, b in zip(ts, ts[1:], strict=False))       # time strictly increases
+    assert all(b > a for a, b in zip(dists, dists[1:], strict=False))  # distance integrates up
     assert all(isinstance(r["speed"], float) for r in rows if r.get("speed") is not None)
 
 

@@ -63,7 +63,9 @@ def slip_angles(samples: list[Sample]) -> list[float | None]:
     return out
 
 
-def _calibrate_gain(samples: list[Sample], yaw: list[float | None], L: float) -> tuple[float | None, int]:
+def _calibrate_gain(
+    samples: list[Sample], yaw: list[float | None], L: float
+) -> tuple[float | None, int]:
     """Estimate k in ``yaw ~= k * steering * v / L`` from the linear (low-g) regime."""
     ratios: list[float] = []
     for i, s in enumerate(samples):

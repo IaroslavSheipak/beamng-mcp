@@ -2,7 +2,8 @@
 
 from beamng_mcp.engineer import advisor, knowledge
 
-AVAIL = {"$arb_spring_F": 45000, "$arb_spring_R": 25000, "$damp_rebound_F": 18000, "$brakebias": 0.68}
+AVAIL = {"$arb_spring_F": 45000, "$arb_spring_R": 25000,
+         "$damp_rebound_F": 18000, "$brakebias": 0.68}
 
 
 def _v2_report(symptom_type="understeer", confidence="medium"):

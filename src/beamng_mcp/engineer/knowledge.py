@@ -685,7 +685,7 @@ def _selftest() -> None:
         for rem in rule["remedies"]:
             assert rem["lever"] in LEVERS, f"unknown lever {rem['lever']}"
             assert rem["dir"] in ("+", "-")
-    for lev, spec in LEVERS.items():
+    for spec in LEVERS.values():
         for pat in spec["var_patterns"]:
             re.compile(pat)
 

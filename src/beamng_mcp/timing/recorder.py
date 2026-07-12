@@ -124,7 +124,9 @@ class RichLapRecorder:
                     # A non-dict return (e.g. None) would crash .get below OUTSIDE
                     # the guard, silently killing the thread. Validate + surface.
                     if not isinstance(row_data, dict):
-                        self._poll_error = f"poll_fn returned {type(row_data).__name__}, expected dict"
+                        self._poll_error = (
+                            f"poll_fn returned {type(row_data).__name__}, expected dict"
+                        )
                         self._stop.set()
                         break
 

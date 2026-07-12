@@ -215,8 +215,8 @@ def diagnose(feedback: str, report: dict | None = None,
     try:
         return _diagnose(feedback, report, available_vars)
     except Exception as exc:  # noqa: BLE001 — server contract: never raise
-        return {"ok": False, "error": "diagnose failed: %r" % exc,
-                "persona": "%s: lost telemetry on that one, say again." % ENGINEER,
+        return {"ok": False, "error": f"diagnose failed: {exc!r}",
+                "persona": f"{ENGINEER}: lost telemetry on that one, say again.",
                 "complaints": [], "plan": [], "caveats": []}
 
 
@@ -307,11 +307,11 @@ def _diagnose(feedback: str, report: dict | None, available_vars: dict | None) -
         plan.append(item)
 
         if spec.get("confidence") == "low" and spec.get("note"):
-            caveats.append("%s (%s): %s" % (_label(rep["lever"]), var, spec["note"]))
+            caveats.append("{} ({}): {}".format(_label(rep["lever"]), var, spec["note"]))
         if conflict:
             caveats.append(
-                "Conflict on %s (%s): complaints pull both ways — went '%s' (%s)."
-                % (_label(rep["lever"]), var, net_dir, rep["rationale"]))
+                f"Conflict on {_label(rep['lever'])} ({var}): complaints pull "
+                f"both ways — went '{net_dir}' ({rep['rationale']}).")
 
     # --- 3. Order the plan: most important (lowest priority) first. ----------
     plan.sort(key=lambda it: (it["priority"], -CONF_RANK.get(it["confidence"], 1)))
@@ -361,17 +361,16 @@ def format_report(report: dict | None, diagnosis: dict) -> str:
     """Render the pit-wall radio brief from a diagnosis (+ optional telemetry)."""
     if not isinstance(diagnosis, dict) or not diagnosis.get("ok"):
         err = (diagnosis or {}).get("error", "no diagnosis")
-        return "%s: no call to make — %s" % (ENGINEER, err)
+        return f"{ENGINEER}: no call to make — {err}"
 
-    lines: list[str] = ["== RACE ENGINEER : %s ==" % ENGINEER,
+    lines: list[str] = [f"== RACE ENGINEER : {ENGINEER} ==",
                         diagnosis.get("persona", "")]
 
     comps = diagnosis.get("complaints") or []
     if comps:
         lines.append("  read:")
         for c in comps:
-            lines.append("    - %s %s  [%s, %s]"
-                         % (c.get("phase"), c.get("symptom"),
+            lines.append("    - {} {}  [{}, {}]".format(c.get("phase"), c.get("symptom"),
                             c.get("source"), c.get("confidence")))
 
     plan = diagnosis.get("plan") or []
@@ -379,15 +378,15 @@ def format_report(report: dict | None, diagnosis: dict) -> str:
         lines.append("  plan:")
         for it in plan:
             if "delta_pct" in it and it["delta_pct"] is not None:
-                chg = "%+.1f%%" % it["delta_pct"]
+                chg = "{:+.1f}%".format(it["delta_pct"])
             elif "delta" in it:
-                chg = "%+g" % it["delta"]
+                chg = "{:+g}".format(it["delta"])
             else:
                 chg = ""
-            lines.append("    P%-2d %s %s: %s %g -> %g (%s) [%s, %s]"
-                         % (it["priority"], _verb(_kind_of(it["var"]), it["dir"]),
-                            _label(it["lever"]), it["var"], it["current"],
-                            it["proposed"], chg, it["source"], it["confidence"]))
+            lines.append(
+                f"    P{it['priority']:<2} {_verb(_kind_of(it['var']), it['dir'])} "
+                f"{_label(it['lever'])}: {it['var']} {it['current']:g} -> "
+                f"{it['proposed']:g} ({chg}) [{it['source']}, {it['confidence']}]")
     else:
         lines.append("  plan: nothing actionable — no resolvable levers for this car.")
 
@@ -395,16 +394,16 @@ def format_report(report: dict | None, diagnosis: dict) -> str:
         bal = report.get("balance") or {}
         if bal.get("tendency") and bal["tendency"] != "unknown":
             slip = bal.get("slip_angle_deg")
-            extra = ", slip %.1f deg" % slip if slip is not None else ""
-            lines.append("  telemetry: %s (%s confidence%s)"
-                         % (bal["tendency"], bal.get("confidence", "low"), extra))
+            extra = f", slip {slip:.1f} deg" if slip is not None else ""
+            conf = bal.get("confidence", "low")
+            lines.append(f"  telemetry: {bal['tendency']} ({conf} confidence{extra})")
 
     cav = diagnosis.get("caveats") or []
     if cav:
         lines.append("  caveats:")
         for c in cav:
-            lines.append("    ! %s" % c)
-    return "\n".join(l for l in lines if l)
+            lines.append(f"    ! {c}")
+    return "\n".join(ln for ln in lines if ln)
 
 
 def _kind_of(var: str) -> str:
@@ -415,19 +414,19 @@ def _kind_of(var: str) -> str:
 def _persona(complaints: list[dict], plan: list[dict]) -> str:
     """One-line radio call from the named engineer."""
     if not complaints:
-        return "%s: telemetry's clean and you said nothing — no change called." % ENGINEER
-    read = ", ".join("%s %s" % (c["phase"].lower(), c["symptom"])
+        return f"{ENGINEER}: telemetry's clean and you said nothing — no change called."
+    read = ", ".join("{} {}".format(c["phase"].lower(), c["symptom"])
                      for c in complaints[:2])
     if not plan:
-        return ("%s: copy — reading %s, but this car doesn't expose the levers I'd "
-                "reach for. Standing pat." % (ENGINEER, read))
+        return (f"{ENGINEER}: copy — reading {read}, but this car doesn't expose the levers I'd "
+                "reach for. Standing pat.")
     top = plan[0]
     extra = len(plan) - 1
-    tail = " %d more queued." % extra if extra > 0 else ""
-    return ("%s: copy — reading %s. First move, %s the %s (%s %g->%g).%s"
-            % (ENGINEER, read, _verb(_kind_of(top["var"]), top["dir"]),
-               _label(top["lever"]), top["var"], top["current"],
-               top["proposed"], tail))
+    tail = f" {extra} more queued." if extra > 0 else ""
+    verb = _verb(_kind_of(top["var"]), top["dir"])
+    return (f"{ENGINEER}: copy — reading {read}. First move, {verb} the "
+            f"{_label(top['lever'])} ({top['var']} {top['current']:g}"
+            f"->{top['proposed']:g}).{tail}")
 
 
 def _dedupe(seq: list[str]) -> list[str]:

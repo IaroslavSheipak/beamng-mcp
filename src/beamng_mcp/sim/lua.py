@@ -48,8 +48,8 @@ def traction_control_lua(on: bool) -> str:
         "local n=0 for _,cmu in ipairs(controller.getControllersByType("
         "'drivingDynamics/CMU')) do local tc=cmu.getSupervisor and "
         "cmu.getSupervisor('tractionControl') if tc and tc.setParameters then "
-        "tc.setParameters({isEnabled=%s}) n=n+1 end end "
-        "return jsonEncode({ok=true,toggled=n,enabled=%s})" % (en, en)
+        f"tc.setParameters({{isEnabled={en}}}) n=n+1 end end "
+        f"return jsonEncode({{ok=true,toggled=n,enabled={en}}})"
     )
 
 
@@ -62,7 +62,7 @@ def tire_pressure_lua(psi_f: float | None, psi_r: float | None) -> str:
     pf = "nil" if psi_f is None else repr(float(psi_f))
     pr = "nil" if psi_r is None else repr(float(psi_r))
     return (
-        "local pf,pr=%s,%s local done={} "
+        f"local pf,pr={pf},{pr} local done={{}} "
         "if wheels and wheels.wheels then "
         "for i=0,tableSizeC(wheels.wheels)-1 do local wh=wheels.wheels[i] "
         "if wh and wh.name then local n=string.upper(wh.name) "
@@ -70,7 +70,7 @@ def tire_pressure_lua(psi_f: float | None, psi_r: float | None) -> str:
         "elseif string.sub(n,1,1)=='R' and pr then p=pr end "
         "if p and wh.pressureGroup then obj:setGroupPressure(wh.pressureGroup,p*6894.757+101325) "
         "done[#done+1]={wh.name,p} end end end end "
-        "return jsonEncode({ok=true,set=done})" % (pf, pr)
+        "return jsonEncode({ok=true,set=done})"
     )
 
 

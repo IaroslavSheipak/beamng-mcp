@@ -69,7 +69,7 @@ def parse(data: bytes) -> dict:
         raise ValueError(f"unexpected OutGauge packet length: {n} (want 92 or 96)")
 
     values = struct.unpack(fmt, data)
-    out = dict(zip(FIELDS, values[: len(FIELDS)]))
+    out = dict(zip(FIELDS, values[: len(FIELDS)], strict=False))
     if has_id:
         out["id"] = values[len(FIELDS)]
 
@@ -101,7 +101,7 @@ def listen_once(ip: str = "127.0.0.1", port: int = 4444, timeout: float = 2.0) -
         sock.settimeout(timeout)
         try:
             data, _addr = sock.recvfrom(96)
-        except socket.timeout:
+        except TimeoutError:
             return None
         return parse(data)
     finally:
