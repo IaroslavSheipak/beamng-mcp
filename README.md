@@ -1,5 +1,10 @@
 # beamng-mcp — your AI race engineer for BeamNG.drive
 
+[![CI](https://github.com/IaroslavSheipak/beamng-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/IaroslavSheipak/beamng-mcp/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)
+![Platform: Windows](https://img.shields.io/badge/platform-Windows-lightgrey)
+
 An [MCP](https://modelcontextprotocol.io) server that turns Claude (or any MCP
 client) into a **pit-wall race engineer** for a stock, retail **BeamNG.drive**
 install (Steam) — **no BeamNG.tech license required**. You drive; the AI times
@@ -16,6 +21,12 @@ you:    *drives*
 Mara:   candidate FASTER by 0.84 s — carrying +2.1 km/h through the matched
         corners; balance moved to neutral. Keeping it. Want it saved as a .pc?
 ```
+
+![lap debrief — track map colored by speed, two-lap speed overlay, delta-T vs distance](docs/debrief.png)
+
+*A real `plot_laps` debrief from a tuning session: the track map colored by
+speed with apex speeds marked, the two-lap speed overlay, and delta-T vs
+distance — 14 seconds found between baseline and candidate.*
 
 ## What you can ask for
 
@@ -39,7 +50,8 @@ full drive → feel → tune → prove loop), `/track_day_debrief` (analyze + co
 **1. Install** (Windows python — the server talks to a Windows game):
 
 ```bat
-cd C:\Users\Iaroslav\beamng-mcp
+git clone https://github.com/IaroslavSheipak/beamng-mcp.git
+cd beamng-mcp
 python -m venv .venv
 .venv\Scripts\python.exe -m pip install -e .
 ```
@@ -47,7 +59,7 @@ python -m venv .venv
 **2. Register with Claude Code.** The console entry point keeps paths simple:
 
 ```bat
-claude mcp add beamng -- C:\Users\Iaroslav\beamng-mcp\.venv\Scripts\beamng-mcp.exe
+claude mcp add beamng -- C:\path\to\beamng-mcp\.venv\Scripts\beamng-mcp.exe
 ```
 
 (From WSL the same registration works — the `.exe` path is what matters. Any
@@ -90,10 +102,10 @@ spawns anything unless you explicitly use the ACTIVE-mode tools
 | Env var | Default | Meaning |
 | --- | --- | --- |
 | `BEAMNG_HOME` | `C:\Program Files (x86)\Steam\steamapps\common\BeamNG.drive` | install dir (has `Bin64`) |
-| `BEAMNG_USER` | `C:\Users\Iaroslav\AppData\Local\BeamNG\BeamNG.drive\current` | active user profile (`.pc` configs live in `vehicles\`) |
+| `BEAMNG_USER` | `%LOCALAPPDATA%\BeamNG\BeamNG.drive\current` | active user profile (`.pc` configs live in `vehicles\`) |
 | `BEAMNG_HOST` / `BEAMNG_PORT` | `127.0.0.1` / `25252` | the tech socket |
 | `BEAMNG_LOGS_DIR` | `%LOCALAPPDATA%\beamng-mcp\logs` | where lap/drive CSVs land (stable, cwd-independent) |
-| `BEAMNG_FULL_SURFACE` | unset (core) | `1` exposes all 47 tools instead of the 21-tool core |
+| `BEAMNG_FULL_SURFACE` | unset (core) | `1` exposes all 56 tools instead of the 30-tool core |
 
 ## The race-engineer loop
 
@@ -196,7 +208,7 @@ The **full surface** adds 26 power tools — set `BEAMNG_FULL_SURFACE=1` in the
 server's environment:
 
 ```bat
-claude mcp add beamng --env BEAMNG_FULL_SURFACE=1 -- C:\Users\Iaroslav\beamng-mcp\.venv\Scripts\beamng-mcp.exe
+claude mcp add beamng --env BEAMNG_FULL_SURFACE=1 -- C:\path\to\beamng-mcp\.venv\Scripts\beamng-mcp.exe
 ```
 
 **Alternate timing modes** — `start_lap`/`lap_status`/`stop_lap` (manual),
@@ -263,10 +275,13 @@ Run `doctor` first — it automates most of this table.
 ## Development
 
 ```bat
-.venv\Scripts\python.exe -m pytest -q     & REM 162 tests, offline, ~7 s
+.venv\Scripts\python.exe -m pytest -q     & REM 191 tests, offline, ~7 s
 .venv\Scripts\python.exe -m ruff check src tests
-.venv\Scripts\python.exe -m mypy
 ```
+
+(There is also a `mypy` config; that gate is currently red — a numpy-stubs
+parse abort had silently disabled it for a while and 61 findings accumulated.
+Restoring it is tracked in the issues.)
 
 Layout: `src/beamng_mcp/` — `server.py` (FastMCP tool layer + prompts),
 `app.py` (service wiring), `sim/` (the verified BeamNGpy integration layer:
@@ -275,3 +290,10 @@ doctor), `timing/` (one lap-timing state machine + rich recorder + line
 geometry), `analysis/` (validity-gated, impact-cleaned lap metrics; compare;
 coach), `engineer/` (the symptom→lever knowledge base + advisor). Design
 history and the porting contract live in `REBUILD.md`.
+
+## License
+
+[MIT](LICENSE). Not affiliated with or endorsed by BeamNG GmbH —
+[BeamNG.drive](https://www.beamng.com/) is their game; this project talks to it
+through the official open-source [beamngpy](https://github.com/BeamNG/BeamNGpy)
+API and license-free telemetry protocols.

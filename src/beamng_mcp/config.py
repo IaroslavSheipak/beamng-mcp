@@ -12,9 +12,20 @@ import os
 from dataclasses import dataclass
 
 DEFAULT_GAME_HOME = r"C:\Program Files (x86)\Steam\steamapps\common\BeamNG.drive"
-DEFAULT_USER_FOLDER = r"C:\Users\Iaroslav\AppData\Local\BeamNG\BeamNG.drive\current"
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 25252
+
+
+def _default_user_folder() -> str:
+    """The game's active user profile for the launching user. BeamNG (Steam)
+    keeps it under ``%LOCALAPPDATA%\\BeamNG\\BeamNG.drive\\current``."""
+    base = os.environ.get("LOCALAPPDATA") or os.path.join(
+        os.path.expanduser("~"), "AppData", "Local"
+    )
+    return os.path.join(base, "BeamNG", "BeamNG.drive", "current")
+
+
+DEFAULT_USER_FOLDER = _default_user_folder()
 
 
 def _default_logs_dir() -> str:
@@ -37,7 +48,7 @@ class Settings:
     port: int
     #: Where drive/lap CSVs are written (RichLapRecorder + DriveLogger share it).
     logs_dir: str
-    #: False (default) = the ~21-tool core surface (the whole engineer loop);
+    #: False (default) = the 30-tool core surface (the whole engineer loop);
     #: True (BEAMNG_FULL_SURFACE=1) = all tools incl. ACTIVE mode / .pc files /
     #: raw Lua / part swapping / alternate timing modes.
     full_surface: bool = False

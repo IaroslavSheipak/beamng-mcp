@@ -5,3 +5,7 @@ __pycache__/
 logs/
 scratch/
 *.pc.bak
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+dist/
