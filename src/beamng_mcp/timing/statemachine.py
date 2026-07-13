@@ -107,6 +107,7 @@ class LapTimer:
         motion: MotionSource | None = None,
     ) -> None:
         self.sim = sim
+        self._logs_dir = logs_dir
         self.recorder = RichLapRecorder(logs_dir)
         self._analyze = analyze
         #: Optional MotionSimListener (duck-typed) -- adds true yaw rate +
@@ -124,6 +125,20 @@ class LapTimer:
         self._sess: dict = {"state": "idle"}
         self._laps: list = []
         sim.add_disconnect_hook(self.shutdown)
+
+    # -- forensic event trail --------------------------------------------------
+    def _log_event(self, msg: str) -> None:
+        """One-line append to ``logs_dir/timer_events.log``. Two live debugging
+        rounds died for lack of exactly this trail (which session started, what
+        failed, what got aborted and why). Best-effort: never raises."""
+        try:
+            os.makedirs(self._logs_dir, exist_ok=True)
+            stamp = time.strftime("%Y-%m-%dT%H:%M:%S")
+            with open(os.path.join(self._logs_dir, "timer_events.log"),
+                      "a", encoding="utf-8") as fh:
+                fh.write(f"{stamp} {msg}\n")
+        except Exception:
+            pass
 
     # -- mutual exclusion ----------------------------------------------------
     def busy(self) -> str | None:
@@ -454,6 +469,7 @@ class LapTimer:
         self._stop.clear()
         self._thread = threading.Thread(target=self._sess_run, args=(float(hz),), daemon=True)
         self._thread.start()
+        self._log_event(f"lap session started (hz={float(hz):g}, vid={self._lap_vid})")
         return {"state": "running", "note": "auto-lap ON — just drive; each flying lap self-times"}
 
     def _start_recording(self, hz: float) -> bool:
@@ -474,6 +490,7 @@ class LapTimer:
         # the dead recorder's partial must not survive as a lap_*.csv
         self._discard_partial(self.recorder.path)
         self._sess = {**self._sess, "state": "error", "error": error}
+        self._log_event(f"SESSION ERROR: {error}")
         if self.line is not None:
             self._draw_text("TIMER ERROR — session stopped", self.line.pos, _ORANGE)
 
@@ -553,6 +570,7 @@ class LapTimer:
         t_cross = self._sess.get("t_cross")
         if t_cross is not None and not stop.get("path"):
             self._sess["discarded"] = self._sess.get("discarded", 0) + 1
+            self._log_event(f"crossing discarded — no recording ({stop.get('error')})")
             self._draw_text("CROSSING DISCARDED — no recording", self.line.pos, _ORANGE)
             self._sess["t_cross"] = ct
             return
@@ -573,7 +591,13 @@ class LapTimer:
                 self._sess["best"] = lt
             tag = "  *BEST*" if is_best else ("" if ok else "  INVALID")
             color = _GREEN if is_best else (_YELLOW if ok else _ORANGE)
+            self._log_event(
+                f"LAP {num} {fmt_time(lt)} valid={ok}"
+                + (f" dist={dist:.0f}m" if dist is not None else "")
+                + (f" ({reason})" if reason else ""))
             self._draw_text(f"LAP {num}  {fmt_time(lt)}{tag}", self.line.pos, color)
+        else:
+            self._log_event("first crossing — lap 1 opened")
         self._sess["t_cross"] = ct
 
     def _check_lap_distance(self, dist: float | None) -> tuple[bool, str | None]:
@@ -648,6 +672,7 @@ class LapTimer:
             self._stop.set()
             if self._thread is not None:
                 self._thread.join(timeout=4.0)
+            self._log_event(f"lap session stopped ({len(self._laps)} laps)")
         return self.lap_session_status()
 
     # -- mid-session abort (setup apply / idle guard) -------------------------
@@ -672,6 +697,7 @@ class LapTimer:
         cancelled. No-op when nothing is open.
         """
         owner = self.busy()
+        self._log_event(f"abort_current_lap ({owner or 'no-op'}): {reason}")
         if owner == "lap_session":
             stop = self.recorder.stop()
             discarded = self._discard_partial(stop.get("path"))

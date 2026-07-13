@@ -353,3 +353,22 @@ def test_teleport_within_grace_after_rearm_is_ignored(tmp_path, monkeypatch):
         assert _cross(t, veh)
     finally:
         t.stop_lap_session()
+
+
+def test_timer_events_log_written(tmp_path):
+    t, veh = _harness(tmp_path)
+    veh.state["vel"] = [30.0, 0.0, 0.0]
+    t.start_lap_session(hz=50.0)
+    try:
+        assert _wait(lambda: t.recorder.running)
+        assert _cross(t, veh)
+        t.abort_current_lap("setup apply (respawn)")
+    finally:
+        t.stop_lap_session()
+    log = os.path.join(tmp_path, "timer_events.log")
+    assert os.path.isfile(log)
+    text = open(log, encoding="utf-8").read()
+    assert "lap session started" in text
+    assert "first crossing" in text
+    assert "abort_current_lap (lap_session): setup apply (respawn)" in text
+    assert "lap session stopped" in text
