@@ -276,3 +276,80 @@ def test_idle_guard_aborts_time_trial(tmp_path, monkeypatch):
     st = t.time_trial_status()
     assert "parked" in st["reason"] and "discarded" in st["reason"]
     assert not _lap_csvs(tmp_path)
+
+
+# --------------------------------------------------------------------------- #
+# regression: the "LAP 20 with zero CSVs" live failure (2026-07-13)
+# — a dead recorder must fail the session loud, never time laps blind;
+# — a crossing with no recording behind it must never register a lap;
+# — a respawn teleport right after a re-arm must not read as a crossing.
+# --------------------------------------------------------------------------- #
+def test_session_errors_when_recorder_cannot_start(tmp_path):
+    t, veh = _harness(tmp_path)
+
+    def _broken_poll():
+        raise RuntimeError("wedged vehicle socket")
+
+    t._poll_rich = _broken_poll  # first poll kills the recorder instantly
+    veh.state["vel"] = [30.0, 0.0, 0.0]
+    t.start_lap_session(hz=50.0)
+    assert _wait(lambda: t.lap_session_status()["state"] == "error")
+    st = t.lap_session_status()
+    assert "recorder" in st["error"] and st["count"] == 0
+    assert not _lap_csvs(tmp_path)
+
+
+def test_recorder_death_mid_session_fails_loud_not_blind(tmp_path):
+    t, veh = _harness(tmp_path)
+    veh.state["vel"] = [30.0, 0.0, 0.0]
+    real_poll = t._poll_rich
+    broken = {"on": False}
+
+    def _flaky_poll():
+        if broken["on"]:
+            raise RuntimeError("wedged mid-session")
+        return real_poll()
+
+    t._poll_rich = _flaky_poll
+    t.start_lap_session(hz=50.0)
+    try:
+        assert _wait(lambda: t.recorder.running)
+        broken["on"] = True  # the recorder dies on its next poll
+        assert _wait(lambda: t.lap_session_status()["state"] == "error", timeout=5.0)
+        # ... and the worker must NOT have kept closing laps off direct reads
+        assert t.lap_session_status()["count"] == 0
+    finally:
+        t.stop_lap_session()
+
+
+def test_crossing_without_recording_registers_no_lap(tmp_path):
+    t, _ = _harness(tmp_path)
+    t._sess = _running_sess()
+    t._close_lap(0.0, {"ok": True, "path": "x.csv", "distance_m": 1000.0})  # opens
+    t._close_lap(90.0, {"ok": False, "error": "no active recording"})  # dead stop
+    st = t.lap_session_status()
+    assert st["count"] == 0
+    assert st["discarded_crossings"] == 1
+    assert t._sess["t_cross"] == 90.0  # the crossing still re-opens the next lap
+
+
+def test_teleport_within_grace_after_rearm_is_ignored(tmp_path, monkeypatch):
+    monkeypatch.setattr(statemachine, "CROSS_GRACE_S", 0.6)
+    t, veh = _harness(tmp_path)
+    veh.state["vel"] = [30.0, 0.0, 0.0]
+    t.start_lap_session(hz=50.0)
+    try:
+        assert _wait(lambda: t.recorder.running)
+        assert _cross(t, veh)  # lap 1 opens normally
+        t.abort_current_lap("setup apply (respawn)")
+        assert _wait(lambda: t.recorder.running)  # resumed
+        # a respawn teleport: far behind the plane, then across it, within grace
+        veh.state["pos"] = [-50.0, 0.0, 0.0]
+        time.sleep(0.15)
+        veh.state["pos"] = [5.0, 0.0, 0.0]
+        time.sleep(0.2)  # still inside the 0.6 s grace window
+        assert t._sess.get("t_cross") is None  # the teleport did NOT count
+        time.sleep(0.6)  # grace over — real crossings work again
+        assert _cross(t, veh)
+    finally:
+        t.stop_lap_session()

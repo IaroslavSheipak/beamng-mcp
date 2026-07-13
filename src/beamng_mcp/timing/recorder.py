@@ -74,6 +74,16 @@ class RichLapRecorder:
 
         time.sleep(0.05)  # let the thread open the file / hit an immediate error
         if self._poll_error:
+            # the recording is dead on arrival — a header-only CSV must not
+            # survive as a lap_*.csv (recent_laps/latest_lap glob those)
+            if self._thread is not None:
+                self._thread.join(timeout=1.0)
+            try:
+                if self.path and os.path.isfile(self.path):
+                    os.remove(self.path)
+            except OSError:
+                pass
+            self.path = None
             return {"ok": False, "error": self._poll_error}
         return {"ok": True, "logging": True, "path": self.path, "hz": hz}
 

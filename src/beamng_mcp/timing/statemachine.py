@@ -59,6 +59,11 @@ DISTANCE_TOL = 0.05
 #: driver parked in menus must not roll a phantom recording (live: 3:55 at 0 m).
 IDLE_ABORT_S = 60.0
 IDLE_SPEED_MS = 0.5
+#: Line crossings are ignored for this long after the recorder (re)starts or the
+#: session re-arms after an abort: a setup-apply respawn TELEPORTS the car, and a
+#: teleport segment must never read as a crossing (live failure: "LAP 20" while
+#: one physical lap was driven, off a dead recorder + respawn jumps).
+CROSS_GRACE_S = 2.0
 
 
 def fmt_time(s: float) -> str:
@@ -329,7 +334,12 @@ class LapTimer:
                 time.sleep(1.0)
             self._draw_text("GO!", sl_pos, _GREEN)
             go = time.monotonic()
-            self.recorder.start(self._poll_rich, hz=hz)
+            res = self.recorder.start(self._poll_rich, hz=hz)
+            if not res.get("ok"):  # never time a trial over a dead recorder
+                self._tt = {"state": "error",
+                            "error": f"recorder failed to start: {res.get('error')}"}
+                self._draw_text("TIMER ERROR", sl_pos, _ORANGE)
+                return
             self._tt = {"state": "running", "go_time": go}
             armed = False
             last_draw = 0.0
@@ -446,28 +456,57 @@ class LapTimer:
         self._thread.start()
         return {"state": "running", "note": "auto-lap ON — just drive; each flying lap self-times"}
 
+    def _start_recording(self, hz: float) -> bool:
+        """Start the recorder and FAIL LOUD if it can't: a session must never
+        keep timing laps over a dead recorder (live failure: laps ticked with
+        zero CSVs behind them — nothing to analyze, nothing to prove)."""
+        res = self.recorder.start(self._poll_rich, hz=hz)
+        if res.get("ok"):
+            return True
+        self._fail_session(f"recorder failed to start: {res.get('error')}")
+        return False
+
+    def _fail_session(self, error: str) -> None:
+        try:
+            self.recorder.stop()
+        except Exception:
+            pass
+        # the dead recorder's partial must not survive as a lap_*.csv
+        self._discard_partial(self.recorder.path)
+        self._sess = {**self._sess, "state": "error", "error": error}
+        if self.line is not None:
+            self._draw_text("TIMER ERROR — session stopped", self.line.pos, _ORANGE)
+
     def _sess_run(self, hz: float) -> None:
         try:
             vid = self._lap_vid
             sl_pos = self.line.pos
-            self.recorder.start(self._poll_rich, hz=hz)
+            if not self._start_recording(hz):
+                return
             armed = False
             prev = None
             idle_since: float | None = None
+            parked = False  # recorder intentionally down, waiting for movement
+            ignore_until = time.monotonic() + CROSS_GRACE_S
             while not self._stop.is_set():
                 time.sleep(0.12)
                 now = time.monotonic()
                 if self._rearm.is_set():  # an abort discarded the open partial
                     self._rearm.clear()
                     armed, prev, idle_since = False, None, None
+                    parked = True  # recorder is down until the resume branch
+                    ignore_until = now + CROSS_GRACE_S
                 pos, speed = self._read_kin(vid)
                 if not pos:
                     continue
                 if speed >= IDLE_SPEED_MS:
                     idle_since = None
-                    if not self.recorder.running:  # parked abort over — resume
-                        self.recorder.start(self._poll_rich, hz=hz)
+                    if not self.recorder.running and parked:  # abort over — resume
+                        if not self._start_recording(hz):
+                            return
+                        parked = False
                         armed, prev = False, None
+                        ignore_until = now + CROSS_GRACE_S
                 elif idle_since is None:
                     idle_since = now
                 elif self.recorder.running and now - idle_since >= IDLE_ABORT_S:
@@ -475,18 +514,27 @@ class LapTimer:
                         f"parked below {IDLE_SPEED_MS:g} m/s for {IDLE_ABORT_S:.0f} s")
                     continue
                 if not self.recorder.running:
-                    continue  # parked: nothing recording, nothing to time
+                    if parked:
+                        continue  # parked: nothing recording, nothing to time
+                    # Not parked and not recording = the recorder DIED mid-lap
+                    # (poll error). Blind timing is worse than no timing.
+                    err = self.recorder.status().get("poll_error") or "stopped unexpectedly"
+                    self._fail_session(f"recorder died: {err}")
+                    return
                 if not armed and math.dist(pos, sl_pos) > 40.0:
                     armed = True
                 cur = (now, pos)
-                ct = line_cross(prev, cur, self.line) if armed else None
+                ct = (line_cross(prev, cur, self.line)
+                      if armed and now >= ignore_until else None)
                 prev = cur
                 if ct is not None:
                     stop = self.recorder.stop()
                     self._close_lap(ct, stop)
-                    self.recorder.start(self._poll_rich, hz=hz)
+                    if not self._start_recording(hz):
+                        return
                     armed = False
                     prev = None
+                    ignore_until = time.monotonic() + CROSS_GRACE_S
             self.recorder.stop()
             self._sess["state"] = "stopped"
         except Exception as exc:  # noqa: BLE001
@@ -499,8 +547,15 @@ class LapTimer:
     def _close_lap(self, ct: float, stop: dict) -> None:
         """Bookkeep one line crossing: register the closing lap (with the
         session-distance verdict) — or, on the session's first crossing, just
-        open lap 1. Only session-valid laps may take "best"."""
+        open lap 1. Only session-valid laps may take "best". A crossing whose
+        recording failed is DISCARDED, never registered — a lap without a CSV
+        behind it cannot be analyzed, compared or believed."""
         t_cross = self._sess.get("t_cross")
+        if t_cross is not None and not stop.get("path"):
+            self._sess["discarded"] = self._sess.get("discarded", 0) + 1
+            self._draw_text("CROSSING DISCARDED — no recording", self.line.pos, _ORANGE)
+            self._sess["t_cross"] = ct
+            return
         if t_cross is not None:
             lt = round(ct - t_cross, 3)
             self._sess["lap"] += 1
@@ -556,6 +611,8 @@ class LapTimer:
         dists = s.get("distances") or []
         if len(dists) >= 2:  # the distance gate is armed — surface its yardstick
             out["median_distance_m"] = round(median(dists), 1)
+        if s.get("discarded"):
+            out["discarded_crossings"] = s["discarded"]
         if s.get("state") == "running" and s.get("t_cross"):
             out["current_lap_elapsed"] = fmt_time(time.monotonic() - s["t_cross"])
         if s.get("error"):
