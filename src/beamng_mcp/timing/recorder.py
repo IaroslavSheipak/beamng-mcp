@@ -45,6 +45,9 @@ class RichLapRecorder:
         self._poll_error: str | None = None
         self.path: str | None = None
         self.samples: int = 0
+        #: Integrated distance (m) of the current/last recording — the timer's
+        #: session-distance gate reads it off ``stop()``.
+        self.dist: float = 0.0
         self._started: float | None = None  # monotonic
 
     @property
@@ -64,6 +67,7 @@ class RichLapRecorder:
             self._stop.clear()
             self._poll_error = None
             self.samples = 0
+            self.dist = 0.0
             self._started = time.monotonic()
             self._thread = threading.Thread(target=self._run, args=(poll_fn, hz), daemon=True)
             self._thread.start()
@@ -99,6 +103,7 @@ class RichLapRecorder:
         out: dict = {
             "ok": True, "stopped": True, "path": path,
             "samples": self.samples, "duration_s": duration,
+            "distance_m": round(self.dist, 1),
         }
         if self._poll_error:
             out["poll_error"] = self._poll_error
@@ -139,6 +144,7 @@ class RichLapRecorder:
                         speed_ms = 0.0
                     if dt > 0:
                         dist += speed_ms * dt
+                        self.dist = dist
 
                     row: list = []
                     for field in self._fields:

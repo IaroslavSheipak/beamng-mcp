@@ -16,9 +16,11 @@ injected at wiring time so timing doesn't depend on the analysis package.
 from __future__ import annotations
 
 import math
+import os
 import threading
 import time
 from collections.abc import Callable
+from statistics import median
 from typing import Protocol
 
 from ..errors import BeamNGError
@@ -46,6 +48,17 @@ _AMBER = (1.0, 0.7, 0.05, 1.0)
 _GREEN = (0.1, 1.0, 0.2, 1.0)
 _YELLOW = (1.0, 1.0, 0.2, 1.0)
 _ORANGE = (1.0, 0.5, 0.1, 1.0)
+
+#: Session-distance gate: once >=2 valid laps banked their distance, a closing
+#: lap deviating from their median by more than this fraction is not a real lap
+#: of this track (live failure: a respawn-truncated 857 m "lap" on a 1100 m
+#: circuit read as valid and stole "best").
+DISTANCE_TOL = 0.05
+#: Idle guard: an open lap whose car stays below IDLE_SPEED_MS for this many
+#: consecutive seconds is aborted (partial discarded, session stays armed) — a
+#: driver parked in menus must not roll a phantom recording (live: 3:55 at 0 m).
+IDLE_ABORT_S = 60.0
+IDLE_SPEED_MS = 0.5
 
 
 def fmt_time(s: float) -> str:
@@ -99,6 +112,9 @@ class LapTimer:
         self._lap_vid: str | None = None
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
+        #: Set by abort_current_lap: the session worker re-arms + resumes recording.
+        self._rearm = threading.Event()
+        self._abort_reason: str | None = None
         self._tt: dict = {"state": "idle"}
         self._sess: dict = {"state": "idle"}
         self._laps: list = []
@@ -165,11 +181,22 @@ class LapTimer:
         row.update(_motion_fields(self._motion))
         return row
 
-    def _read_pos(self, vid: str) -> list | None:
-        """Cached player position (the recorder keeps v.state fresh)."""
+    def _read_kin(self, vid: str) -> tuple[list | None, float]:
+        """Cached player position + speed (the recorder keeps v.state fresh).
+        Polls directly while the recorder is down (parked after an idle abort)
+        so the car's wake-up is still seen."""
         with self.sim.lock:
             v = self.sim.vehicles.get(vid)
-            return dict(v.state).get("pos") if v is not None else None
+            if v is None:
+                return None, 0.0
+            if not self.recorder.running:
+                try:
+                    v.poll_sensors()
+                except Exception:
+                    return None, 0.0
+            st = dict(v.state)
+        vel = st.get("vel") or [0.0, 0.0, 0.0]
+        return st.get("pos"), math.sqrt(sum((c or 0.0) ** 2 for c in vel))
 
     # -- gate + text drawing (best-effort; never raises) ---------------------
     def _draw_text(self, text: str, pos: object, color: tuple = _YELLOW) -> None:
@@ -280,6 +307,7 @@ class LapTimer:
         if not self.line:
             self.set_start_line()
         self._tt = {"state": "counting"}
+        self._abort_reason = None
         self._stop.clear()
         self._thread = threading.Thread(
             target=self._tt_run, args=(int(countdown), float(hz)), daemon=True)
@@ -308,6 +336,7 @@ class LapTimer:
             prev = None
             cross_t = None
             timed_out = False
+            idle_since: float | None = None
             while not self._stop.is_set():
                 time.sleep(0.12)
                 now = time.monotonic()
@@ -315,9 +344,17 @@ class LapTimer:
                 if el > 900:
                     timed_out = True
                     break
-                pos = self._read_pos(vid)
+                pos, speed = self._read_kin(vid)
                 if not pos:
                     continue
+                if speed >= IDLE_SPEED_MS:
+                    idle_since = None
+                elif idle_since is None:
+                    idle_since = now
+                elif now - idle_since >= IDLE_ABORT_S:
+                    self._abort_reason = (
+                        f"parked below {IDLE_SPEED_MS:g} m/s for {IDLE_ABORT_S:.0f} s")
+                    break
                 if now - last_draw > 0.33:
                     self._draw_text(fmt_time(el), pos, _YELLOW)
                     last_draw = now
@@ -341,7 +378,16 @@ class LapTimer:
                 pass
 
     def _finish_trial(self, cross_t, timed_out, go, armed, stop, sl_pos) -> None:
-        if cross_t is not None:
+        if self._abort_reason:  # aborted (idle guard / abort_current_lap) — no lap
+            discarded = self._discard_partial(stop.get("path"))
+            reason = f"aborted: {self._abort_reason}"
+            if discarded:
+                reason += " — partial lap discarded"
+            self._tt = {"state": "aborted", "armed": armed, "reason": reason,
+                        "discarded": discarded}
+            self._abort_reason = None
+            self._draw_text("NO LAP", sl_pos, _ORANGE)
+        elif cross_t is not None:
             lt = cross_t - go
             self._tt = {"state": "done", "lap_time": round(lt, 3), "auto": True,
                         "armed": armed, "csv": stop.get("path")}
@@ -391,7 +437,10 @@ class LapTimer:
         with self.sim.lock:
             self._lap_vid = use_current(self.sim, None)
         self._laps = []
-        self._sess = {"state": "running", "lap": 0, "t_cross": None, "best": None}
+        self._sess = {"state": "running", "lap": 0, "t_cross": None, "best": None,
+                      "distances": []}
+        self._abort_reason = None
+        self._rearm.clear()
         self._stop.clear()
         self._thread = threading.Thread(target=self._sess_run, args=(float(hz),), daemon=True)
         self._thread.start()
@@ -404,12 +453,29 @@ class LapTimer:
             self.recorder.start(self._poll_rich, hz=hz)
             armed = False
             prev = None
+            idle_since: float | None = None
             while not self._stop.is_set():
                 time.sleep(0.12)
                 now = time.monotonic()
-                pos = self._read_pos(vid)
+                if self._rearm.is_set():  # an abort discarded the open partial
+                    self._rearm.clear()
+                    armed, prev, idle_since = False, None, None
+                pos, speed = self._read_kin(vid)
                 if not pos:
                     continue
+                if speed >= IDLE_SPEED_MS:
+                    idle_since = None
+                    if not self.recorder.running:  # parked abort over — resume
+                        self.recorder.start(self._poll_rich, hz=hz)
+                        armed, prev = False, None
+                elif idle_since is None:
+                    idle_since = now
+                elif self.recorder.running and now - idle_since >= IDLE_ABORT_S:
+                    self.abort_current_lap(
+                        f"parked below {IDLE_SPEED_MS:g} m/s for {IDLE_ABORT_S:.0f} s")
+                    continue
+                if not self.recorder.running:
+                    continue  # parked: nothing recording, nothing to time
                 if not armed and math.dist(pos, sl_pos) > 40.0:
                     armed = True
                 cur = (now, pos)
@@ -417,20 +483,7 @@ class LapTimer:
                 prev = cur
                 if ct is not None:
                     stop = self.recorder.stop()
-                    t_cross = self._sess.get("t_cross")
-                    if t_cross is not None:
-                        lt = round(ct - t_cross, 3)
-                        self._sess["lap"] += 1
-                        num = self._sess["lap"]
-                        self._laps.append({"num": num, "time": lt, "csv": stop.get("path")})
-                        best = self._sess.get("best")
-                        is_best = best is None or lt < best
-                        if is_best:
-                            self._sess["best"] = lt
-                        self._draw_text(
-                            f"LAP {num}  {fmt_time(lt)}{'  *BEST*' if is_best else ''}",
-                            sl_pos, _GREEN if is_best else _YELLOW)
-                    self._sess["t_cross"] = ct
+                    self._close_lap(ct, stop)
                     self.recorder.start(self._poll_rich, hz=hz)
                     armed = False
                     prev = None
@@ -443,15 +496,66 @@ class LapTimer:
             except Exception:
                 pass
 
+    def _close_lap(self, ct: float, stop: dict) -> None:
+        """Bookkeep one line crossing: register the closing lap (with the
+        session-distance verdict) — or, on the session's first crossing, just
+        open lap 1. Only session-valid laps may take "best"."""
+        t_cross = self._sess.get("t_cross")
+        if t_cross is not None:
+            lt = round(ct - t_cross, 3)
+            self._sess["lap"] += 1
+            num = self._sess["lap"]
+            dist = stop.get("distance_m")
+            ok, reason = self._check_lap_distance(dist)
+            lap = {"num": num, "time": lt, "csv": stop.get("path"),
+                   "distance_m": dist, "valid": ok}
+            if reason:
+                lap["invalid_reason"] = reason
+            self._laps.append(lap)
+            best = self._sess.get("best")
+            is_best = ok and (best is None or lt < best)
+            if is_best:
+                self._sess["best"] = lt
+            tag = "  *BEST*" if is_best else ("" if ok else "  INVALID")
+            color = _GREEN if is_best else (_YELLOW if ok else _ORANGE)
+            self._draw_text(f"LAP {num}  {fmt_time(lt)}{tag}", self.line.pos, color)
+        self._sess["t_cross"] = ct
+
+    def _check_lap_distance(self, dist: float | None) -> tuple[bool, str | None]:
+        """Session-level distance gate: valid laps bank their distance; once >=2
+        are banked, a closing lap deviating from their median by more than
+        DISTANCE_TOL is invalid (respawn-/cut-truncated). Per-lap validity
+        (analysis.validity) can't know this — it takes session knowledge."""
+        if dist is None:
+            return True, None
+        pool: list = self._sess.setdefault("distances", [])
+        if len(pool) >= 2:
+            med = median(pool)
+            if med > 0 and abs(dist - med) / med > DISTANCE_TOL:
+                return False, f"distance {dist:.0f} m vs session median {med:.0f} m"
+        pool.append(dist)
+        return True, None
+
     def lap_session_status(self) -> dict:
         s = dict(self._sess)
+        laps = []
+        for x in self._laps:
+            e: dict = {"num": x["num"], "time": fmt_time(x["time"]), "time_s": x["time"],
+                       "valid": x.get("valid", True)}
+            if x.get("distance_m") is not None:
+                e["distance_m"] = x["distance_m"]
+            if x.get("invalid_reason"):
+                e["invalid_reason"] = x["invalid_reason"]
+            laps.append(e)
         out: dict = {
             "state": s.get("state", "idle"),
             "count": len(self._laps),
-            "laps": [{"num": x["num"], "time": fmt_time(x["time"]), "time_s": x["time"]}
-                     for x in self._laps],
+            "laps": laps,
             "best": fmt_time(s["best"]) if s.get("best") is not None else None,
         }
+        dists = s.get("distances") or []
+        if len(dists) >= 2:  # the distance gate is armed — surface its yardstick
+            out["median_distance_m"] = round(median(dists), 1)
         if s.get("state") == "running" and s.get("t_cross"):
             out["current_lap_elapsed"] = fmt_time(time.monotonic() - s["t_cross"])
         if s.get("error"):
@@ -464,11 +568,22 @@ class LapTimer:
         last = self._laps[-1]
         out = {"num": last["num"], "lap_time": fmt_time(last["time"]),
                "lap_time_s": last["time"], "csv": last.get("csv")}
+        if last.get("distance_m") is not None:
+            out["distance_m"] = last["distance_m"]
         if last.get("csv") and self._analyze:
             try:
                 out["report"] = self._analyze(last["csv"])
             except Exception as exc:  # noqa: BLE001
                 out["analyze_error"] = repr(exc)
+        if last.get("valid") is False:  # session-distance verdict overlays the report
+            out["valid"] = False
+            out["invalid_reason"] = last.get("invalid_reason")
+            rep = out.get("report")
+            if isinstance(rep, dict) and rep.get("ok"):
+                rep["valid"] = False
+                val = rep.setdefault("validity", {})
+                val["valid"] = False
+                val.setdefault("reasons", []).append(last.get("invalid_reason"))
         return out
 
     def stop_lap_session(self) -> dict:
@@ -477,6 +592,51 @@ class LapTimer:
             if self._thread is not None:
                 self._thread.join(timeout=4.0)
         return self.lap_session_status()
+
+    # -- mid-session abort (setup apply / idle guard) -------------------------
+    def _discard_partial(self, path: str | None) -> bool:
+        """Delete an aborted partial CSV: it must never survive as a ``lap_*.csv``
+        (``recent_laps``/``latest_lap`` glob those). Registered laps are kept."""
+        if not path or any(x.get("csv") == path for x in self._laps):
+            return False
+        try:
+            os.remove(path)
+        except OSError:
+            return False
+        return True
+
+    def abort_current_lap(self, reason: str) -> dict:
+        """Close the open recording WITHOUT registering a lap; discard its CSV.
+
+        Called before a respawn (``apply_setup``) and by the idle guard. A lap
+        session (the pit session wraps the same timer) stays armed: ``t_cross``
+        clears and the worker re-arms, so the next line crossing opens a clean
+        lap. A time trial cannot survive its car respawning/parking, so it is
+        cancelled. No-op when nothing is open.
+        """
+        owner = self.busy()
+        if owner == "lap_session":
+            stop = self.recorder.stop()
+            discarded = self._discard_partial(stop.get("path"))
+            self._sess["t_cross"] = None
+            self._rearm.set()
+            return {"aborted": True, "mode": owner, "session": "re-armed",
+                    "discarded": discarded, "reason": reason}
+        if owner == "time_trial":
+            self._abort_reason = reason
+            self._stop.set()
+            t = self._thread
+            if t is not None and t is not threading.current_thread():
+                t.join(timeout=4.0)
+            return {"aborted": True, "mode": owner, "session": "idle",
+                    "discarded": bool(self._tt.get("discarded")), "reason": reason}
+        if owner == "lap":
+            stop = self.recorder.stop()
+            discarded = self._discard_partial(stop.get("path"))
+            return {"aborted": True, "mode": owner, "session": "idle",
+                    "discarded": discarded, "reason": reason}
+        return {"aborted": False, "mode": None, "session": "idle",
+                "discarded": False, "reason": reason}
 
     # -- teardown (registered as a disconnect hook) --------------------------
     def shutdown(self) -> None:

@@ -1,7 +1,13 @@
+import os
+import time
+from types import SimpleNamespace
+
 import pytest
 
 from beamng_mcp.errors import BeamNGError
 from beamng_mcp.sim.context import Simulator
+from beamng_mcp.timing import statemachine
+from beamng_mcp.timing.line import StartLine
 from beamng_mcp.timing.statemachine import LapTimer, _motion_fields, fmt_time
 
 
@@ -98,3 +104,175 @@ def test_motion_field_names_are_recorder_columns():
             return {"acc": (0.0, 0.0, 0.0), "ang_vel": (0.0, 0.0, 0.0)}
 
     assert set(_motion_fields(_FakeListener())) <= set(RICH_FIELDS)
+
+
+# --------------------------------------------------------------------------- #
+# harness: a real worker over a scripted car (the pitwall/optimizer Fake style)
+# — the abort path, the session-distance gate, the idle guard
+# --------------------------------------------------------------------------- #
+class FakeVehicle:
+    """Enough of a beamngpy Vehicle for _poll_rich/_read_kin: scripted state."""
+
+    def __init__(self):
+        self.state = {"pos": [-50.0, 0.0, 0.0], "vel": [0.0, 0.0, 0.0],
+                      "dir": [1.0, 0.0, 0.0]}
+        self.sensors = {"electrics": {}, "gforces": {}}
+
+    def is_connected(self):
+        return True
+
+    def poll_sensors(self):
+        pass
+
+
+def _harness(tmp_path, analyze=None):
+    """LapTimer against a fake game: the line is the x=0 plane, +x forward."""
+    sim = Simulator()
+    sim.bng = SimpleNamespace(
+        vehicles=SimpleNamespace(get_player_vehicle_id=lambda: {"vid": "car"}))
+    veh = FakeVehicle()
+    sim.vehicles["car"] = veh
+    t = LapTimer(sim, str(tmp_path), analyze=analyze)
+    t.line = StartLine(pos=[0.0, 0.0, 0.0], heading=[1.0, 0.0, 0.0])
+    return t, veh
+
+
+def _running_sess():
+    return {"state": "running", "lap": 0, "t_cross": None, "best": None,
+            "distances": []}
+
+
+def _wait(pred, timeout=3.0):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if pred():
+            return True
+        time.sleep(0.01)
+    return False
+
+
+def _lap_csvs(tmp_path):
+    return [f for f in os.listdir(tmp_path) if f.startswith("lap_")]
+
+
+def _cross(t, veh, timeout=6.0):
+    """Script one line crossing: arm far behind the x=0 plane, then step past it
+    (retried until a worker tick has seen both positions)."""
+    before = t._sess.get("t_cross")
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        veh.state["pos"] = [-50.0, 0.0, 0.0]
+        time.sleep(0.3)
+        veh.state["pos"] = [5.0, 0.0, 0.0]
+        if _wait(lambda: t._sess.get("t_cross") not in (None, before), timeout=0.5):
+            return True
+    return False
+
+
+def test_abort_current_lap_idle_is_a_noop(tmp_path):
+    out = _timer(tmp_path).abort_current_lap("setup apply")
+    assert out == {"aborted": False, "mode": None, "session": "idle",
+                   "discarded": False, "reason": "setup apply"}
+
+
+def test_abort_current_lap_discards_partial_and_rearms(tmp_path):
+    t, veh = _harness(tmp_path)
+    veh.state["vel"] = [30.0, 0.0, 0.0]  # driving — the idle guard stays quiet
+    t.start_lap_session(hz=50.0)
+    try:
+        assert _wait(lambda: t.recorder.running)
+        assert _cross(t, veh)  # a lap is now open
+        assert _wait(lambda: t.recorder.running)
+        open_csv = t.recorder.path
+        out = t.abort_current_lap("setup apply (respawn)")
+        assert out["aborted"] and out["discarded"] and out["session"] == "re-armed"
+        assert not os.path.exists(open_csv)  # never left behind as lap_*.csv
+        assert t._sess["state"] == "running" and t._sess["t_cross"] is None
+        assert _wait(lambda: t.recorder.running)  # worker re-armed + resumed
+        assert _cross(t, veh)  # next crossing opens a clean lap
+        assert t._laps == []  # the aborted partial never became a lap
+    finally:
+        t.stop_lap_session()
+
+
+def test_abort_current_lap_cancels_time_trial(tmp_path):
+    t, veh = _harness(tmp_path)
+    veh.state["vel"] = [30.0, 0.0, 0.0]
+    t.start_time_trial(countdown=0, hz=50.0)
+    assert _wait(lambda: t.time_trial_status()["state"] == "running")
+    out = t.abort_current_lap("setup apply (respawn)")
+    assert out["aborted"] and out["discarded"] and out["session"] == "idle"
+    assert t.time_trial_status()["state"] == "aborted"
+    assert not _lap_csvs(tmp_path)
+
+
+def test_session_distance_outlier_marks_lap_invalid(tmp_path):
+    # The live failure: a respawn-truncated 857 m "lap" on a ~1100 m circuit
+    # passed per-lap validity and stole "best".
+    t, _ = _harness(tmp_path)
+    t._sess = _running_sess()
+    t._close_lap(0.0, {})  # first crossing: opens lap 1, closes nothing
+    for i, d in enumerate([1100.0, 1105.0, 1095.0], start=1):
+        t._close_lap(i * 90.0, {"path": f"lap_{i}.csv", "distance_m": d})
+    t._close_lap(330.0, {"path": "lap_4.csv", "distance_m": 857.0})  # a 60 s "lap"
+    st = t.lap_session_status()
+    assert [x["valid"] for x in st["laps"]] == [True, True, True, False]
+    reason = st["laps"][3]["invalid_reason"]
+    assert "857" in reason and "median" in reason and "1100" in reason
+    assert st["median_distance_m"] == 1100.0  # the outlier never joined the pool
+    assert st["best"] == "1:30.000"  # ... and never took best despite being fastest
+
+
+def test_distance_gate_needs_two_banked_laps(tmp_path):
+    t, _ = _harness(tmp_path)
+    t._sess = _running_sess()
+    t._close_lap(0.0, {})
+    t._close_lap(90.0, {"path": "lap_1.csv", "distance_m": 857.0})
+    st = t.lap_session_status()
+    assert st["laps"][0]["valid"] and "median_distance_m" not in st
+    t._close_lap(180.0, {"path": "lap_2.csv", "distance_m": 1100.0})
+    assert t.lap_session_status()["laps"][1]["valid"]  # pool had 1 — not judged
+
+
+def test_last_lap_carries_session_distance_verdict_into_report(tmp_path):
+    t, _ = _harness(
+        tmp_path,
+        analyze=lambda p: {"ok": True, "valid": True,
+                           "validity": {"valid": True, "reasons": []}})
+    t._sess = _running_sess()
+    t._close_lap(0.0, {})
+    for i, d in enumerate([1100.0, 1102.0, 857.0], start=1):
+        t._close_lap(i * 90.0, {"path": f"lap_{i}.csv", "distance_m": d})
+    out = t.last_lap()
+    assert out["valid"] is False and "857" in out["invalid_reason"]
+    rep = out["report"]  # the surface the pit board reads — it will never coach this
+    assert rep["valid"] is False
+    assert any("857" in r for r in rep["validity"]["reasons"])
+
+
+def test_idle_guard_aborts_parked_open_lap(tmp_path, monkeypatch):
+    monkeypatch.setattr(statemachine, "IDLE_ABORT_S", 0.3)
+    t, veh = _harness(tmp_path)  # vel 0: parked from the first sample
+    t.start_lap_session(hz=50.0)
+    try:
+        assert _wait(lambda: t.recorder.running)
+        t._sess["t_cross"] = time.monotonic()  # a lap is open while the car sits
+        assert _wait(lambda: not t.recorder.running)  # the guard fired
+        assert t._sess["state"] == "running"  # session survives, still armed
+        assert t._sess["t_cross"] is None
+        assert t._laps == []
+        assert not _lap_csvs(tmp_path)  # the phantom recording was discarded
+        veh.state["vel"] = [20.0, 0.0, 0.0]  # wake up: recording resumes
+        assert _wait(lambda: t.recorder.running)
+    finally:
+        t.stop_lap_session()
+
+
+def test_idle_guard_aborts_time_trial(tmp_path, monkeypatch):
+    monkeypatch.setattr(statemachine, "IDLE_ABORT_S", 0.3)
+    t, _ = _harness(tmp_path)  # parked
+    t.start_time_trial(countdown=0, hz=50.0)
+    assert _wait(lambda: t.time_trial_status()["state"] == "aborted")
+    st = t.time_trial_status()
+    assert "parked" in st["reason"] and "discarded" in st["reason"]
+    assert not _lap_csvs(tmp_path)

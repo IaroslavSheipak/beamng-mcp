@@ -124,7 +124,11 @@ class App:
         save_as: str | None = None, vid: str | None = None,
     ) -> dict:
         """Apply a ``race_engineer`` plan (or an explicit ``{$var: value}`` map),
-        optionally persisting it as a ``.pc`` build."""
+        optionally persisting it as a ``.pc`` build. Applying RESPAWNS the car,
+        so any open partial lap is aborted first (CSV discarded — a lap recorded
+        through a respawn closes as a phantom short "valid" lap); a running
+        lap/pit session stays armed and self-times cleanly from the next
+        crossing."""
         if isinstance(vars, dict) and vars:
             vmap = vars
         elif isinstance(plan, list):
@@ -133,7 +137,16 @@ class App:
             vmap = None
         if not vmap:
             raise BeamNGError('nothing to apply: pass plan=[...] or vars={"$var": value}')
+        aborted = self.timer.abort_current_lap("setup apply (respawn)")
         res = tuning.set_tuning_vars(self.sim, vmap, vid=vid)
+        res["session"] = aborted["session"]
+        res["discarded_partial"] = bool(aborted.get("discarded"))
+        if res["discarded_partial"]:
+            res["note"] += (
+                " Open partial lap discarded (the respawn would corrupt it); "
+                + ("session re-armed — the next line crossing starts a clean lap."
+                   if res["session"] == "re-armed" else "timing is now idle.")
+            )
         if save_as:
             res["saved"] = tuning.save_config(self.sim, save_as, vid=res.get("vid"))
         return res
